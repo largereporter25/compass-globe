@@ -142,16 +142,18 @@ export async function infer(rawClues: Clue[]): Promise<InferenceResult> {
 
   const top = list.slice(0, 8);
 
-  // Street-level cross-check for the leading candidate only. KartaView needs
-  // no token, so imagery works on a fresh deploy; Mapillary is added on top
-  // when a token is present.
-  if (top[0] && top[0].precision !== "country") {
+  // Street-level cross-check. KartaView needs no token, so imagery works on a
+  // fresh deploy; Mapillary is added on top when a token is present.
+  // A country centroid is a meaningless place to look for street imagery, so
+  // attach it to the best-ranked candidate that is actually a place.
+  const imageryTarget = top.find((c) => c.precision === "locality") ?? top.find((c) => c.precision === "sub-national");
+  if (imageryTarget) {
     const [mly, kv] = await Promise.all([
-      mapillaryNear(top[0].lat, top[0].lon),
-      kartaviewNear(top[0].lat, top[0].lon),
+      mapillaryNear(imageryTarget.lat, imageryTarget.lon),
+      kartaviewNear(imageryTarget.lat, imageryTarget.lon),
     ]);
     const imgs = [...mly, ...kv].slice(0, 6);
-    if (imgs.length) top[0].streetImages = imgs;
+    if (imgs.length) imageryTarget.streetImages = imgs;
   }
 
   const summary = buildSummary(top, clues.length, geocodeHits);
