@@ -31,8 +31,17 @@ create table if not exists clues (
   frame_idx         int  not null,
   kind              text not null,
   value             text not null,
-  rationale         text
+  rationale         text,
+  -- Which vision model(s) produced this clue. Null for text/OCR clues and
+  -- for rows written before the SigLIP ensemble landed, so existing data
+  -- stays readable without a backfill. Values: clip, siglip, clip+siglip.
+  model             text
 );
+
+-- Existing databases already have a clues table without model; the
+-- "create table if not exists" above would not add it to them. This idempotent
+-- alter (Postgres 9.6+; Neon runs 15) closes that gap on re-running db:init.
+alter table if exists clues add column if not exists model text;
 
 create table if not exists candidate_locations (
   id                serial primary key,
