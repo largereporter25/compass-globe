@@ -42,9 +42,10 @@ create table if not exists clues (
   kind              text not null,
   value             text not null,
   rationale         text,
-  -- Which vision model(s) produced this clue. Null for text/OCR clues and
-  -- for rows written before the SigLIP ensemble landed, so existing data
-  -- stays readable without a backfill. Values: clip, siglip, clip+siglip.
+  -- Which vision model produced this clue. Null for text/OCR clues and for
+  -- rows written before this column existed, so existing data stays readable
+  -- without a backfill. The set of values is model-agnostic so it survives a
+  -- model swap (e.g. clip -> streetclip) without a migration.
   model             text
 );
 

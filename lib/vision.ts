@@ -2,30 +2,25 @@
 
 // Vision pass — the layer that works when there is no legible text.
 //
-// Two open-source, keyless models run side by side, each entirely in the
-// browser through transformers.js (ONNX Runtime Web):
+// A single open-source, keyless model runs entirely in the browser through
+// transformers.js (ONNX Runtime Web):
 //
-//   - CLIP ViT-B/32 (Xenova/clip-vit-base-patch32) — the original pass.
-//   - SigLIP base  patch16-224 (Xenova/siglip-base-patch16-224) — a second,
-//     independently-trained contrastive model whose errors do not correlate
-//     with CLIP's. Google released SigLIP under Apache-2.0; the ONNX export
-//     is keyless and runs on the same transformers.js runtime as CLIP, so no
-//     second inference engine is pulled in.
+//   - CLIP ViT-B/32 (Xenova/clip-vit-base-patch32) — a zero-shot image-vs-text
+//     contrastive model.
 //
-// Both models are zero-shot image-vs-text classifiers over the same prompt
-// bank. Their probability vectors are combined into an ensemble score (see
-// scoreFrame). Neither replaces the other: if SigLIP fails to load — a slow
-// CDN, an unsupported dtype, an out-of-memory WASM heap — the pass degrades
-// to CLIP-only and the interface says so rather than failing silently.
+// CLIP is an image/text *similarity* model, not a geolocation model. It is
+// only ever used here as a ranking aid inside a region the text evidence has
+// already constrained, never to select a country or region on its own. A
+// lone visual guess — no matter how confident — must not anchor a location.
 //
 // The approach is deliberate: text embeddings for the whole prompt bank are
-// computed once per model and reused, then each keyframe becomes a single
-// image embedding and everything is cosine similarity. That keeps a 200-prompt
-// bank affordable on a laptop CPU, where the naive zero-shot pipeline would
+// computed once and reused, then each keyframe becomes a single image
+// embedding and everything is cosine similarity. That keeps a 200-prompt bank
+// affordable on a laptop CPU, where the naive zero-shot pipeline would
 // re-encode every prompt for every frame.
 //
 // This is explicitly a *second opinion*, kept separate from the text evidence
-// in the UI. Both models are confidently wrong on a regular basis and the
+// in the UI. The model is confidently wrong on a regular basis and the
 // interface says so.
 
 import { LANDMARKS, NEGATIVE_PROMPTS, SCENE_PRIORS } from "./visual-priors";
@@ -35,7 +30,7 @@ import type { Progress } from "./pipeline";
 // bundled. Two reasons: its ONNX Runtime build uses `import.meta` in a way
 // Next's minifier rejects, and keeping ~40 MB of inference runtime out of the
 // main bundle means the app still loads instantly for anyone who leaves the
-// vision pass switched off. Both CLIP and SigLIP share this one import.
+// vision pass switched off.
 const TRANSFORMERS_URL = "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.5.1";
 
 let libPromise: Promise<any> | null = null;
@@ -50,7 +45,6 @@ function loadLib(): Promise<any> {
 }
 
 const CLIP_MODEL_ID = "Xenova/clip-vit-base-patch32";
-const SIGLIP_MODEL_ID = "Xenova/siglip-base-patch16-224";
 
 /**
  * WebGPU where the browser has it, WASM everywhere else.
@@ -68,11 +62,6 @@ export function visionBackend(): { device: "webgpu" | "wasm"; dtype: "fp16" | "q
 let activeBackend: "webgpu" | "wasm" | null = null;
 export const getActiveBackend = () => activeBackend;
 
-// Whether the ensemble ran or the pass fell back to CLIP alone. Read by the UI
-// after a run so the fallback is told to the investigator rather than silent.
-let visionMode: "clip+siglip" | "clip" | null = null;
-export const getVisionMode = () => visionMode;
-
 export type VisualClue = {
   kind: "landmark" | "scene" | "environment";
   frame: number;
@@ -85,9 +74,8 @@ export type VisualClue = {
   countryCode?: string;
 };
 
-// One model's loaded state: its tokenizer/processor/encoders plus the prompt
-// bank pre-encoded into a normalized text-embedding matrix. CLIP and SigLIP
-// each own one of these; SigLIP's is null when it could not be loaded.
+// The model's loaded state: its tokenizer/processor/encoders plus the prompt
+// bank pre-encoded into a normalized text-embedding matrix.
 type ModelBank = { prompts: string[]; textEmbeddings: number[][] };
 type ModelCtx = {
   tokenizer: any;
@@ -97,7 +85,7 @@ type ModelCtx = {
   bank: ModelBank;
 };
 
-let cached: { clip: ModelCtx; siglip: ModelCtx | null } | null = null;
+let cached: ModelCtx | null = null;
 
 function l2normalize(v: number[]): number[] {
   let n = 0;
@@ -129,10 +117,11 @@ function allPrompts(): string[] {
   ];
 }
 
-// CLIP's text/vision models expose `text_embeds` / `image_embeds`; SigLIP's
-// expose `pooler_output` for both modalities (the projection is built in).
-// `encodeTextBank` reads whichever key the model emitted, so a checkpoint that
-// names the output differently does not silently break scoring.
+// CLIP's text/vision models expose `text_embeds` / `image_embeds`. Some other
+// contrastive checkpoints (and the StreetCLIP swap this module is headed for)
+// emit `pooler_output` for a modality instead. `encodeTextBank` reads
+// whichever key the model emitted, so a checkpoint that names the output
+// differently does not silently break scoring.
 
 /**
  * Pre-encode a model's prompt bank once. Batched so a long bank does not blow
@@ -166,17 +155,12 @@ export async function loadVision(onProgress: (p: Progress) => void) {
   const {
     AutoProcessor, AutoTokenizer,
     CLIPTextModelWithProjection, CLIPVisionModelWithProjection,
-    SiglipTextModel, SiglipVisionModel,
   } = await loadLib();
 
   const prompts = allPrompts();
-  const deviceOpts = () => {
-    const p = visionBackend();
-    return { device: p.device, dtype: p.dtype } as any;
-  };
 
-  // ── CLIP (the original pass). A failure here is fatal to the vision pass,
-  // so it is allowed to throw — the caller in page.tsx catches and reports it.
+  // ── CLIP. A failure here is fatal to the vision pass, so it is allowed to
+  // throw — the caller in page.tsx catches and reports it.
   const loadClip = async (device: "webgpu" | "wasm", dtype: "fp16" | "q8") => {
     onProgress({
       stage: "vision",
@@ -205,70 +189,25 @@ export async function loadVision(onProgress: (p: Progress) => void) {
   }
 
   onProgress({ stage: "vision", detail: "Encoding the CLIP visual clue bank", pct: 0.56 });
-  const clip: ModelCtx = {
+  cached = {
     tokenizer, processor, textModel, visionModel,
     bank: { prompts, textEmbeddings: await encodeTextBank(textModel, tokenizer, prompts) },
   };
-
-  // ── SigLIP (the second pass). This is genuinely optional: if the weights
-  // fail to download or the runtime rejects the dtype, the pass simply runs
-  // CLIP-only. The failure is swallowed here and surfaced through the mode
-  // the UI reads, so an investigator is told SigLIP is unavailable rather
-  // than losing the whole vision pass over it.
-  onProgress({ stage: "vision", detail: "Loading the SigLIP vision model", pct: 0.62 });
-  let siglip: ModelCtx | null = null;
-  try {
-    const opts = deviceOpts();
-    const [st, sp, stm, svm] = await Promise.all([
-      AutoTokenizer.from_pretrained(SIGLIP_MODEL_ID),
-      AutoProcessor.from_pretrained(SIGLIP_MODEL_ID),
-      SiglipTextModel.from_pretrained(SIGLIP_MODEL_ID, opts),
-      SiglipVisionModel.from_pretrained(SIGLIP_MODEL_ID, opts),
-    ]);
-    onProgress({ stage: "vision", detail: "Encoding the SigLIP visual clue bank", pct: 0.66 });
-    siglip = {
-      tokenizer: st, processor: sp, textModel: stm, visionModel: svm,
-      bank: { prompts, textEmbeddings: await encodeTextBank(stm, st, prompts) },
-    };
-  } catch (err) {
-    console.warn("SigLIP vision model could not be loaded; running CLIP-only:", err);
-    siglip = null;
-  }
-
-  cached = { clip, siglip };
-  visionMode = siglip ? "clip+siglip" : "clip";
   return cached;
 }
 
 /** Score one frame against the whole bank and return the clues worth keeping. */
-async function scoreFrame(ctx: NonNullable<typeof cached>, blob: Blob, frameIndex: number): Promise<VisualClue[]> {
+async function scoreFrame(ctx: ModelCtx, blob: Blob, frameIndex: number): Promise<VisualClue[]> {
   const { RawImage } = await loadLib();
   const image = await RawImage.fromBlob(blob);
 
-  // Each model scores the frame against the same prompt bank independently,
-  // then the two probability distributions are averaged. Averaging — rather
-  // than picking a winner — is the point: CLIP and SigLIP were trained on
-  // different data with different losses, so their confident errors do not
-  // line up, and the ensemble is conservative on purpose. A frame only reaches
-  // the high landmark bar when *both* models lean the same way.
-  const probsFor = async (model: ModelCtx) => {
-    const inputs = await model.processor(image);
-    const out = await model.visionModel(inputs);
-    const emb = l2normalize(Array.from((out?.image_embeds ?? out?.pooler_output).data as Float32Array));
-    return softmax(model.bank.textEmbeddings.map((t) => dot(emb, t)));
-  };
-
-  const clipProbs = await probsFor(ctx.clip);
-  let probs: number[];
-  let modelTag: string;
-  if (ctx.siglip) {
-    const siglipProbs = await probsFor(ctx.siglip);
-    probs = clipProbs.map((p, i) => (p + siglipProbs[i]) / 2);
-    modelTag = "CLIP + SigLIP ensemble";
-  } else {
-    probs = clipProbs;
-    modelTag = "CLIP (SigLIP unavailable)";
-  }
+  // The frame is scored against the prompt bank as a single image embedding
+  // and a cosine similarity per prompt, then softmaxed into a distribution.
+  const inputs = await ctx.processor(image);
+  const visOut = await ctx.visionModel(inputs);
+  const emb = l2normalize(Array.from((visOut?.image_embeds ?? visOut?.pooler_output).data as Float32Array));
+  const probs = softmax(ctx.bank.textEmbeddings.map((t) => dot(emb, t)));
+  const modelTag = "CLIP";
 
   const nLandmarks = LANDMARKS.length;
   const nScenes = SCENE_PRIORS.length;

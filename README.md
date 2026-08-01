@@ -106,13 +106,12 @@ becomes a single image embedding and the rest is cosine similarity. That keeps
 a 200-prompt bank affordable on a laptop CPU. Weights download once from the
 Hugging Face CDN and are then cached — the images never leave the tab.
 
-A second model, Google's **SigLIP** (base patch16-224, Apache-2.0), runs on the
-same transformers.js runtime alongside CLIP. Its errors do not correlate with
-CLIP's, so the two models' per-prompt probability distributions are averaged
-into one ensemble score. The landmark bar only clears when *both* lean the same
-way, which is deliberately conservative — a false landmark match is the most
-misleading thing this tool could output. If SigLIP fails to load, the pass
-falls back to CLIP-only and the toggle says so.
+CLIP is an image/text *similarity* model, not a geolocation model, so it is
+kept strictly as a ranking aid inside a region the text evidence has already
+constrained — it is never allowed to select a country or region on its own.
+A false landmark match is the most misleading thing this tool could output,
+so the bar is deliberately high and a lone visual guess never anchors a
+location.
 
 **Tested:** a clip built only from Jantar Mantar photographs, with no readable
 text in any frame, returns *Jantar Mantar, New Delhi* and *Red Fort, Delhi* as
@@ -292,7 +291,7 @@ correct. Bands are `Weak` / `Moderate` / `Strong`.
 | OCR | `tesseract.js` | Runs client-side, ~20 scripts, no key |
 | Clue engine | Plain TypeScript in `lib/clues.ts` | Deterministic and auditable beats opaque and slightly better |
 | Gazetteer | OpenStreetMap Nominatim | Free, keyless, ODbL |
-| Vision | CLIP ViT-B/32 + SigLIP base (Apache-2.0) via `@huggingface/transformers`, in-browser ensemble | Landmark and streetscape recognition without a paid vision API; two models' scores are averaged |
+| Vision | CLIP ViT-B/32 (Apache-2.0) via `@huggingface/transformers`, in-browser | Landmark and streetscape recognition without a paid vision API; ranks inside the text-determined region only |
 | Street imagery | KartaView + Panoramax (keyless) + Mapillary (optional token) + Copernicus Sentinel-2 (optional token) | CC BY-SA, complementary Global South coverage, works with zero configuration |
 | SIGINT overlays | GPSJam (ADS-B-derived GNSS interference) + OpenSky (live aircraft) | Keyless situational context in the panel, not a location fix |
 | India terrain | Bhuvan (ISRO) deep link | Authoritative Indian satellite and land-use data, opened for manual cross-check |
@@ -307,7 +306,7 @@ app/
 lib/
   pipeline.ts               browser-side extraction + Tesseract + frame stats
   sun.ts                    NOAA solar position and shadow-window solver
-  vision.ts                 CLIP + SigLIP ensemble pass, runs in the browser
+  vision.ts                 CLIP pass, runs in the browser
   visual-priors.ts          landmark and streetscape prompt banks (plain data)
   clues.ts                  deterministic clue matchers
   regions.ts                centroids, plate prefixes, dialling codes, script priors
@@ -414,7 +413,7 @@ The UI states all of this in the "Method and limits" panel. Please leave it ther
 - [x] Scene-change threshold exposed in the UI, plus a keyframe-quality score
 - [x] Real satellite, street and terrain basemaps with street-level descent
 - [x] WebGPU inference path with automatic WASM fallback
-- [x] SigLIP second vision model, ensemble-scored alongside CLIP
+- [ ] StreetCLIP geolocation model replacing generic CLIP (in progress)
 - [x] Optional Copernicus Sentinel-2 high-res scene previews
 - [x] GPSJam + OpenSky SIGINT/open-data overlays for the top candidates
 - [ ] Bhuvan WMS layers rendered in-app rather than linked out
