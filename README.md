@@ -42,7 +42,8 @@ of the frame rather than out of a Western-skewed training set.
 ```
 video file (never uploaded)
    │
-   ├─ 1. ffmpeg.wasm ─────── keyframes, by scene-change score or even interval
+   ├─ 1. keyframes ───────── Fast: the browser's own decoder, sampled evenly
+   │                         Deep scan: real ffmpeg (WASM) scene detection
    │
    ├─ 2. Tesseract.js ────── OCR per frame, in whichever scripts you select
    │
@@ -56,10 +57,46 @@ video file (never uploaded)
    │
    ├─ 4. OpenStreetMap Nominatim ─ resolves place names to real coordinates
    │
-   ├─ 5. weighted aggregation ──── ranked candidates + confidence band
+   ├─ 5. KartaView + Mapillary ─── street-level imagery near the lead candidate
    │
-   └─ 6. globe + reasoning trail ─ every candidate shows the clues that produced it
+   ├─ 6. weighted aggregation ──── ranked candidates + confidence band
+   │
+   ├─ 7. globe + reasoning trail ─ every candidate shows the clues that produced it
+   │
+   └─ 8. Shadowline ────────────── solar geometry turns a shadow direction
+                                   into a time-of-day window
 ```
+
+### Two extraction modes
+
+**Fast (default)** drives the browser's own video decoder — seek a hidden
+`<video>`, paint each seek to a canvas. It handles every codec the browser can
+play, downloads nothing, and cannot run out of WebAssembly memory on a large
+file. This is the reliable path and it is the default for a reason.
+
+**Deep scan** runs a real ffmpeg build compiled to WebAssembly and uses
+ffmpeg's `select='gt(scene,0.22)'` filter, so frames land where the shot
+actually cuts rather than on a fixed clock. Better frame selection, but it
+loads a 32 MB core and copies the whole file into a virtual filesystem, so it
+is capped at 120 MB and **falls back to Fast automatically** on any failure
+rather than killing the run. The UI always reports which path produced the
+frames.
+
+### Shadowline
+
+A shadow points exactly 180° away from the sun. Given a candidate coordinate, a
+date, and the compass bearing a shadow runs in frame, the time of day is a
+direct inversion — no fitting, no model. Compass Globe implements the NOAA solar
+position algorithm in `lib/sun.ts` (verified against known values: London
+summer-solstice noon elevation 61.9°, Ahmedabad solar noon 84.9° on 1 August).
+It runs in the browser tab.
+
+Enter the shadow bearing and optionally the shadow-length ÷ object-height ratio,
+and it returns the time windows on that date when the sun could have cast it,
+plus sunrise, sunset and solar-noon elevation. Times are a **local solar clock
+derived from longitude** — not a political timezone, no DST. If no window
+matches, that is itself a finding: the date, the bearing reading, or the
+candidate location is wrong.
 
 Steps 1–2 run in the browser. Steps 3–5 run in a Next.js route handler. Only extracted text and small
 JPEG thumbnails cross the network — never the video.
@@ -77,11 +114,12 @@ correct. Bands are `Weak` / `Moderate` / `Strong`.
 | Layer | Choice | Why |
 | --- | --- | --- |
 | Framework | Next.js 14 App Router | One deployable unit, API routes included |
-| Video | `@ffmpeg/ffmpeg` (WASM), vendored in `public/ffmpeg` | Vercel serverless cannot run ffmpeg on video; the browser can, and the file stays local |
+| Video | Browser decoder (default) + `@ffmpeg/ffmpeg` WASM, vendored in `public/ffmpeg` | Vercel serverless cannot run ffmpeg on video; the browser can, and the file stays local |
+| Solar math | `lib/sun.ts`, NOAA algorithm | Astronomy needs no service and no dataset |
 | OCR | `tesseract.js` | Runs client-side, ~20 scripts, no key |
 | Clue engine | Plain TypeScript in `lib/clues.ts` | Deterministic and auditable beats opaque and slightly better |
 | Gazetteer | OpenStreetMap Nominatim | Free, keyless, ODbL |
-| Street imagery | Mapillary (optional) | CC BY-SA, real Global South coverage |
+| Street imagery | KartaView (keyless) + Mapillary (optional token) | CC BY-SA, complementary Global South coverage, works with zero configuration |
 | Globe | `react-globe.gl` / three.js | Hex-polygon countries, confidence-scaled points |
 | Database | Neon Postgres over HTTP | Serverless-friendly; app degrades gracefully without it |
 
@@ -91,10 +129,11 @@ app/
   api/analyze/route.ts      clues → geodata → candidates → persistence
   api/investigations/       saved investigation list and detail
 lib/
-  pipeline.ts               browser-side ffmpeg + Tesseract + frame stats
+  pipeline.ts               browser-side extraction + Tesseract + frame stats
+  sun.ts                    NOAA solar position and shadow-window solver
   clues.ts                  deterministic clue matchers
   regions.ts                centroids, plate prefixes, dialling codes, script priors
-  geo.ts                    Nominatim + Mapillary clients
+  geo.ts                    Nominatim + Mapillary + KartaView clients
   infer.ts                  evidence weighting and ranking
   db.ts                     Neon client + schema
 components/Globe.tsx        three.js globe
@@ -135,7 +174,7 @@ python3 scripts/make-test-clip.py     # writes ./test-clip.mp4
 | Variable | Required | Purpose |
 | --- | --- | --- |
 | `DATABASE_URL` | No | Neon Postgres pooled connection string. Without it, analysis still runs and the header says `Neon not configured`; nothing is saved. |
-| `MAPILLARY_TOKEN` | No | Free client token from the [Mapillary developer dashboard](https://www.mapillary.com/dashboard/developers). Enables street-level imagery next to the leading candidate. |
+| `MAPILLARY_TOKEN` | No | Free client token from the [Mapillary developer dashboard](https://www.mapillary.com/dashboard/developers). Adds Mapillary imagery on top of KartaView, which already works without any key. |
 | `NOMINATIM_USER_AGENT` | **Yes before deploying** | Nominatim's usage policy requires a real identifying contact string, e.g. `compass-globe/0.1 (you@example.com)`. Set it or you risk being blocked. |
 
 ### Deployment notes
@@ -160,6 +199,8 @@ python3 scripts/make-test-clip.py     # writes ./test-clip.mp4
 - **Region markers sit on centroids.** They mark a hypothesis area, never a camera position.
 - **The gazetteer produces false positives.** Generic words get filtered, but not perfectly.
 - **Green-pixel share and luma are observations only.** They are displayed, never scored.
+- **Shadow timing assumes the date you enter** and a flat, unobstructed horizon.
+- **Shadowline times are a solar clock,** not a wall clock. Convert before comparing to a claimed timestamp.
 
 The UI states all of this in the "Method and limits" panel. Please leave it there in any fork.
 
@@ -167,13 +208,15 @@ The UI states all of this in the "Method and limits" panel. Please leave it ther
 
 ## Roadmap
 
-- [ ] Scene-change threshold exposed in the UI, with a keyframe-quality score
-- [ ] Sun-angle / shadow time estimation from a candidate coordinate (pure astronomy, no API)
-- [ ] KartaView and Panoramax alongside Mapillary
+- [x] Browser-decoder extraction path so keyframes never fail to appear
+- [x] Sun-angle / shadow time estimation from a candidate coordinate (Shadowline)
+- [x] KartaView alongside Mapillary, working without any API key
+- [x] Markdown evidence report alongside the JSON bundle
+- [ ] Panoramax as a third open imagery source
 - [ ] Bhuvan (ISRO) layers for India-specific terrain and land-use cross-checking
 - [ ] Local GeoCLIP / StreetCLIP inference as a second, clearly-separated opinion
 - [ ] Saved investigation browser and shareable case links
-- [ ] PDF evidence export alongside the JSON bundle
+- [ ] Scene-change threshold exposed in the UI, with a keyframe-quality score
 - [ ] Community-contributed regional signage patterns beyond India and the UK
 
 ## Contributing
@@ -188,5 +231,5 @@ Two rules: no paid or proprietary vision APIs, and no clue may be added without 
 
 ## Licence and data attribution
 
-Code: MIT. Geodata: © OpenStreetMap contributors, ODbL. Street imagery: Mapillary contributors,
-CC BY-SA. Country polygons: Natural Earth, public domain.
+Code: MIT. Geodata: © OpenStreetMap contributors, ODbL. Street imagery: Mapillary and KartaView
+contributors, CC BY-SA. Country polygons: Natural Earth, public domain.

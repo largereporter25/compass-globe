@@ -56,7 +56,15 @@ export async function geocode(name: string): Promise<GeocodeHit | null> {
   }
 }
 
-export type StreetImage = { id: string; thumb: string; lat: number; lon: number; capturedAt?: number };
+export type StreetImage = {
+  id: string;
+  thumb: string;
+  lat: number;
+  lon: number;
+  source: "Mapillary" | "KartaView";
+  link: string;
+  capturedAt?: string;
+};
 
 // Mapillary is the only meaningful open street-level imagery corpus with real
 // coverage across South Asia, Africa and Latin America — the exact regions the
@@ -80,12 +88,49 @@ export async function mapillaryNear(lat: number, lon: number, radiusDeg = 0.05):
     return (json.data || [])
       .filter((d: any) => d.thumb_1024_url && d.geometry?.coordinates)
       .map((d: any) => ({
-        id: d.id,
+        id: String(d.id),
         thumb: d.thumb_1024_url,
         lon: d.geometry.coordinates[0],
         lat: d.geometry.coordinates[1],
-        capturedAt: d.captured_at,
+        source: "Mapillary" as const,
+        link: `https://www.mapillary.com/app/?pKey=${d.id}`,
+        capturedAt: d.captured_at ? new Date(d.captured_at).toISOString().slice(0, 10) : undefined,
       }));
+  } catch {
+    return [];
+  }
+}
+
+// KartaView (formerly OpenStreetCam) is fully open and needs no token, so
+// street-level cross-checking works out of the box on a fresh deployment.
+// Its coverage complements Mapillary, which matters most outside Europe.
+export async function kartaviewNear(lat: number, lon: number, radiusM = 2000): Promise<StreetImage[]> {
+  const url =
+    "https://api.openstreetcam.org/2.0/photo/?" +
+    new URLSearchParams({
+      lat: String(lat),
+      lng: String(lon),
+      radius: String(Math.min(radiusM, 2000)),
+      itemsPerPage: "6",
+    });
+  try {
+    const res = await fetch(url, { headers: { Accept: "application/json" } });
+    if (!res.ok) return [];
+    const json = (await res.json()) as any;
+    const rows = json?.result?.data;
+    if (!Array.isArray(rows)) return [];
+    return rows
+      .filter((d: any) => d.fileurlTh || d.fileurlProc)
+      .map((d: any) => ({
+        id: String(d.id),
+        thumb: d.fileurlTh || d.fileurlProc,
+        lat: parseFloat(d.lat),
+        lon: parseFloat(d.lng),
+        source: "KartaView" as const,
+        link: `https://kartaview.org/details/${d.sequenceId}/${d.sequenceIndex}`,
+        capturedAt: typeof d.shotDate === "string" ? d.shotDate.slice(0, 10) : undefined,
+      }))
+      .filter((d: StreetImage) => Number.isFinite(d.lat) && Number.isFinite(d.lon));
   } catch {
     return [];
   }

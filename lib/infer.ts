@@ -4,7 +4,7 @@
 
 import type { Clue } from "./clues";
 import { dedupeClues } from "./clues";
-import { geocode, mapillaryNear, type StreetImage } from "./geo";
+import { geocode, kartaviewNear, mapillaryNear, type StreetImage } from "./geo";
 import { resolveRegion } from "./regions";
 
 export type Candidate = {
@@ -142,9 +142,15 @@ export async function infer(rawClues: Clue[]): Promise<InferenceResult> {
 
   const top = list.slice(0, 8);
 
-  // Optional street-level cross-check for the leading candidate only.
-  if (top[0]) {
-    const imgs = await mapillaryNear(top[0].lat, top[0].lon);
+  // Street-level cross-check for the leading candidate only. KartaView needs
+  // no token, so imagery works on a fresh deploy; Mapillary is added on top
+  // when a token is present.
+  if (top[0] && top[0].precision !== "country") {
+    const [mly, kv] = await Promise.all([
+      mapillaryNear(top[0].lat, top[0].lon),
+      kartaviewNear(top[0].lat, top[0].lon),
+    ]);
+    const imgs = [...mly, ...kv].slice(0, 6);
     if (imgs.length) top[0].streetImages = imgs;
   }
 
