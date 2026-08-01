@@ -85,7 +85,7 @@ export type StreetImage = {
   thumb: string;
   lat: number;
   lon: number;
-  source: "Mapillary" | "KartaView";
+  source: "Mapillary" | "KartaView" | "Panoramax";
   link: string;
   capturedAt?: string;
 };
@@ -173,4 +173,52 @@ export async function kartaviewNear(lat: number, lon: number, radiusM = 2000): P
   } catch {
     return [];
   }
+}
+
+// Panoramax is a federated, publicly-governed street imagery network run by
+// French public bodies and OSM communities. Keyless, CC BY-SA, and a useful
+// third opinion where Mapillary and KartaView both thin out.
+export async function panoramaxNear(lat: number, lon: number, radiusDeg = 0.006): Promise<StreetImage[]> {
+  const bbox = [lon - radiusDeg, lat - radiusDeg, lon + radiusDeg, lat + radiusDeg]
+    .map((v) => v.toFixed(6))
+    .join(",");
+  const url = `https://api.panoramax.xyz/api/search?bbox=${bbox}&limit=4`;
+  try {
+    const res = await fetch(url, { headers: { Accept: "application/json" } });
+    if (!res.ok) return [];
+    const json = (await res.json()) as any;
+    const feats = json?.features;
+    if (!Array.isArray(feats)) return [];
+    return feats
+      .map((f: any) => {
+        const thumb = f?.assets?.thumb?.href || f?.assets?.sd?.href;
+        const coords = f?.geometry?.coordinates;
+        if (!thumb || !Array.isArray(coords)) return null;
+        return {
+          id: String(f.id),
+          thumb,
+          lon: coords[0],
+          lat: coords[1],
+          source: "Panoramax" as const,
+          link: `https://api.panoramax.xyz/#focus=pic&pic=${f.id}`,
+          capturedAt: typeof f?.properties?.datetime === "string" ? f.properties.datetime.slice(0, 10) : undefined,
+        };
+      })
+      .filter(Boolean) as StreetImage[];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Bhuvan is ISRO's national geoportal: authoritative Indian satellite imagery,
+ * land-use and terrain layers that no Western dataset matches. There is no
+ * open JSON API worth depending on, so rather than fake an integration this
+ * returns a deep link into Bhuvan's 2D viewer centred on the candidate, for a
+ * manual terrain and land-use cross-check.
+ */
+export function bhuvanLink(lat: number, lon: number): string | null {
+  const inIndia = lat > 6 && lat < 37.5 && lon > 68 && lon < 97.5;
+  if (!inIndia) return null;
+  return `https://bhuvan-app1.nrsc.gov.in/bhuvan2d/bhuvan/bhuvan2d.php?lat=${lat.toFixed(5)}&lon=${lon.toFixed(5)}&zoom=15`;
 }

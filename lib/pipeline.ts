@@ -32,6 +32,8 @@ export type Keyframe = {
   confidence: number;
   vegetationRatio: number;
   meanLuma: number;
+  sharpness: number;
+  quality: number;      // 0-100, how worth analysing this frame is
 };
 
 export type Progress = { stage: string; detail: string; pct: number };
@@ -177,6 +179,7 @@ const DEEP_SCAN_LIMIT = 120 * 1024 * 1024; // ffmpeg.wasm copies the whole file 
 async function extractDeep(
   file: File,
   target: number,
+  sceneThreshold: number,
   onProgress: (p: Progress) => void,
   onLog: (s: string) => void
 ): Promise<ExtractResult> {
@@ -224,7 +227,7 @@ async function extractDeep(
 
   await fs.exec([
     "-i", input,
-    "-vf", "select='gt(scene,0.22)',scale=1024:-2",
+    "-vf", `select='gt(scene,${sceneThreshold.toFixed(2)})',scale=1024:-2`,
     "-vsync", "vfr", "-frames:v", String(target), "-q:v", "3",
     "sc_%03d.jpg",
   ]);
@@ -232,7 +235,7 @@ async function extractDeep(
 
   if (buffers.length < 3) {
     method = "ffmpeg even interval";
-    note = "The clip had too few scene changes to sample, so ffmpeg fell back to an even interval.";
+    note = `No more than two cuts cleared the scene threshold of ${sceneThreshold.toFixed(2)}, so ffmpeg fell back to an even interval. Lower the threshold for a clip with soft transitions.`;
     onProgress({ stage: "extract", detail: "Too few scene changes — sampling at an even interval", pct: 0.22 });
     const fps = duration > 0 ? Math.max(target / duration, 0.05) : 0.5;
     await fs.exec([
@@ -260,13 +263,13 @@ async function extractDeep(
 /** Entry point. Never throws for a recoverable reason — it degrades instead. */
 export async function extractKeyframes(
   file: File,
-  opts: { mode: ExtractMode; target: number },
+  opts: { mode: ExtractMode; target: number; sceneThreshold?: number },
   onProgress: (p: Progress) => void,
   onLog: (s: string) => void = () => {}
 ): Promise<ExtractResult> {
   if (opts.mode === "deep") {
     try {
-      return await extractDeep(file, opts.target, onProgress, onLog);
+      return await extractDeep(file, opts.target, opts.sceneThreshold ?? 0.22, onProgress, onLog);
     } catch (err: any) {
       const why = err?.message || String(err);
       onLog(`Deep scan unavailable: ${why}`);
@@ -282,8 +285,17 @@ export async function extractKeyframes(
  * Frame statistics and OCR
  * ------------------------------------------------------------------ */
 
-/** Cheap, honest image statistics. Reported as observations, never scored. */
-export async function frameStats(blob: Blob): Promise<{ thumb: string; vegetationRatio: number; meanLuma: number }> {
+/**
+ * Cheap, honest image statistics, plus a keyframe quality score.
+ *
+ * Quality combines edge energy (a variance-of-Laplacian proxy for focus) with
+ * a penalty for frames that are nearly black or blown out. A blurred or dark
+ * frame wastes an OCR pass and a CLIP pass, and worse, it produces confident
+ * garbage — so the score is surfaced and low frames are marked.
+ */
+export async function frameStats(blob: Blob): Promise<{
+  thumb: string; vegetationRatio: number; meanLuma: number; sharpness: number; quality: number;
+}> {
   const bitmap = await createImageBitmap(blob);
   const w = 256;
   const h = Math.max(1, Math.round((bitmap.height / bitmap.width) * w));
@@ -294,18 +306,40 @@ export async function frameStats(blob: Blob): Promise<{ thumb: string; vegetatio
   ctx.drawImage(bitmap, 0, 0, w, h);
   const { data } = ctx.getImageData(0, 0, w, h);
   let green = 0;
-  let luma = 0;
+  let lumaSum = 0;
   const px = data.length / 4;
-  for (let i = 0; i < data.length; i += 4) {
+  const grey = new Float32Array(px);
+  for (let i = 0, p = 0; i < data.length; i += 4, p++) {
     const r = data[i], g = data[i + 1], b = data[i + 2];
-    luma += 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    const y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    grey[p] = y;
+    lumaSum += y;
     if (g > r * 1.08 && g > b * 1.08 && g > 45) green++;
   }
+
+  // 4-neighbour Laplacian; its variance is the standard cheap focus measure.
+  let lapSum = 0, lapSqSum = 0, n = 0;
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x;
+      const v = 4 * grey[i] - grey[i - 1] - grey[i + 1] - grey[i - w] - grey[i + w];
+      lapSum += v; lapSqSum += v * v; n++;
+    }
+  }
+  const lapVar = n ? lapSqSum / n - (lapSum / n) ** 2 : 0;
+  const meanLuma = lumaSum / px;
+
+  const focus = Math.min(lapVar / 400, 1);                    // saturates on a sharp frame
+  const exposure = 1 - Math.min(Math.abs(meanLuma - 118) / 118, 1); // punish black or blown frames
+  const quality = Math.round(Math.max(0, Math.min(1, focus * 0.7 + exposure * 0.3)) * 100);
+
   bitmap.close();
   return {
     thumb: canvas.toDataURL("image/jpeg", 0.6),
     vegetationRatio: Number((green / px).toFixed(3)),
-    meanLuma: Number((luma / px).toFixed(1)),
+    meanLuma: Number(meanLuma.toFixed(1)),
+    sharpness: Number(lapVar.toFixed(1)),
+    quality,
   };
 }
 

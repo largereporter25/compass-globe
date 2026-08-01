@@ -14,7 +14,7 @@
 
 import type { Clue } from "./clues";
 import { dedupeClues } from "./clues";
-import { geocode, kartaviewNear, mapillaryNear, type StreetImage } from "./geo";
+import { bhuvanLink, geocode, kartaviewNear, mapillaryNear, panoramaxNear, type StreetImage } from "./geo";
 import { resolveRegion } from "./regions";
 
 export type Candidate = {
@@ -32,6 +32,7 @@ export type Candidate = {
   coherence: "agrees" | "conflicts" | "n/a";
   reasons: { frame: number; kind: string; value: string; rationale: string; weight: number }[];
   streetImages?: StreetImage[];
+  bhuvanUrl?: string | null;
 };
 
 export type InferenceResult = {
@@ -103,11 +104,28 @@ export async function infer(rawClues: Clue[]): Promise<InferenceResult> {
     }
   };
 
-  // ── Pass 1: clues that resolve locally against the static reference tables.
-  // Script, plate prefix, dialling code, ccTLD and currency sign. These carry
-  // no gazetteer bias at all, which is exactly why they anchor the country.
+  // ── Pass 0: landmarks recognised by CLIP. These are the only clues that
+  // point at a coordinate rather than a region, so they get their own bucket
+  // and a weight that reflects how confident the match was.
   const countryVotes = new Map<string, number>();
   for (const clue of clues) {
+    if (clue.kind !== "landmark" || clue.lat == null || clue.lon == null) continue;
+    const weight = 0.5 + Math.min(clue.score ?? 0, 0.6);
+    add(
+      `LM:${clue.value}`, clue.lat, clue.lon, clue.value,
+      resolveRegion(clue.countryCode ?? "")?.label ?? clue.countryCode ?? "Unknown",
+      clue.countryCode, undefined, "locality", weight, clue
+    );
+    if (clue.countryCode) countryVotes.set(clue.countryCode, (countryVotes.get(clue.countryCode) ?? 0) + weight);
+  }
+
+  // ── Pass 1: clues that resolve locally against the static reference tables.
+  // Script, plate prefix, dialling code, ccTLD, currency sign — and the CLIP
+  // streetscape signatures. None of these touch a gazetteer, which is exactly
+  // why they are allowed to anchor the country: they carry no mapping-density
+  // bias, so footage with no legible text can still be anchored.
+  for (const clue of clues) {
+    if (clue.kind === "landmark") continue;
     for (const cand of clue.candidates) {
       const region = resolveRegion(cand.key);
       if (!region) continue;
@@ -212,6 +230,7 @@ export async function infer(rawClues: Clue[]): Promise<InferenceResult> {
   }
 
   const top = list.slice(0, 8);
+  for (const c of top) c.bhuvanUrl = bhuvanLink(c.lat, c.lon);
 
   // Street-level cross-check. KartaView needs no token, so imagery works on a
   // fresh deploy; Mapillary is added on top when a token is present. A country
@@ -221,11 +240,12 @@ export async function infer(rawClues: Clue[]): Promise<InferenceResult> {
     top.find((c) => c.precision === "locality" && c.coherence !== "conflicts") ??
     top.find((c) => c.precision === "sub-national");
   if (imageryTarget) {
-    const [mly, kv] = await Promise.all([
+    const [mly, kv, pnx] = await Promise.all([
       mapillaryNear(imageryTarget.lat, imageryTarget.lon),
       kartaviewNear(imageryTarget.lat, imageryTarget.lon),
+      panoramaxNear(imageryTarget.lat, imageryTarget.lon),
     ]);
-    const imgs = [...mly, ...kv].slice(0, 6);
+    const imgs = [...mly, ...kv, ...pnx].slice(0, 6);
     if (imgs.length) imageryTarget.streetImages = imgs;
   }
 
@@ -241,6 +261,14 @@ export async function infer(rawClues: Clue[]): Promise<InferenceResult> {
     geocodeAttempts,
     geocodeHits,
     anchorCountry: anchorOut,
+  };
+}
+
+export function visualSummary(clues: Clue[]): { landmarks: number; scenes: number; environment: string[] } {
+  return {
+    landmarks: clues.filter((c) => c.kind === "landmark").length,
+    scenes: clues.filter((c) => c.kind === "scene").length,
+    environment: Array.from(new Set(clues.filter((c) => c.kind === "environment").map((c) => c.value))),
   };
 }
 

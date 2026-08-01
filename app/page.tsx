@@ -15,6 +15,7 @@ import {
   type RawFrame,
 } from "@/lib/pipeline";
 import { COMPASS_POINTS, shadowWindows, type ShadowResult } from "@/lib/sun";
+import type { VisualClue } from "@/lib/vision";
 
 const CompassGlobe = dynamic(() => import("@/components/Globe"), {
   ssr: false,
@@ -28,6 +29,8 @@ type Candidate = {
   lat: number; lon: number; score: number; confidence: number;
   band: "Weak" | "Moderate" | "Strong";
   precision: "country" | "sub-national" | "locality";
+  coherence?: "agrees" | "conflicts" | "n/a";
+  bhuvanUrl?: string | null;
   reasons: { frame: number; kind: string; value: string; rationale: string; weight: number }[];
   streetImages?: StreetImage[];
 };
@@ -36,7 +39,8 @@ type AnalyzeResponse = {
   id: string; title: string; persisted: boolean; dbConfigured: boolean; mapillaryConfigured: boolean;
   summary: string; geocodeAttempts: number; geocodeHits: number;
   candidates: Candidate[];
-  clues: { kind: string; frame: number; value: string; rationale: string }[];
+  clues: { kind: string; frame: number; value: string; rationale: string; score?: number }[];
+  anchorCountry: { code: string; label: string; strength: number } | null;
 };
 
 type Tab = "frames" | "trail" | "shadow";
@@ -46,6 +50,8 @@ export default function Page() {
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [mode, setMode] = useState<ExtractMode>("native");
   const [target, setTarget] = useState(10);
+  const [sceneThreshold, setSceneThreshold] = useState(0.22);
+  const [useVision, setUseVision] = useState(true);
   const [langs, setLangs] = useState<string[]>(["eng"]);
   const [langOpen, setLangOpen] = useState(false);
 
@@ -132,7 +138,7 @@ export default function Page() {
 
     // Stage 1 — extraction. This is the stage that must never silently fail.
     try {
-      const out = await extractKeyframes(file, { mode, target }, (p) => { setProgress(p); pushLog(p.detail); }, pushLog);
+      const out = await extractKeyframes(file, { mode, target, sceneThreshold }, (p) => { setProgress(p); pushLog(p.detail); }, pushLog);
       raw = out.frames;
       durationSec = out.durationSec;
       setExtractMethod(out.method);
@@ -153,6 +159,7 @@ export default function Page() {
         idx: f.idx, tSec: f.tSec, blobUrl: URL.createObjectURL(f.blob),
         thumb: stats[i].thumb, text: "", confidence: 0,
         vegetationRatio: stats[i].vegetationRatio, meanLuma: stats[i].meanLuma,
+        sharpness: stats[i].sharpness, quality: stats[i].quality,
       }));
       setFrames(partial);
       setSelectedFrame(0);
@@ -176,6 +183,21 @@ export default function Page() {
       return;
     }
 
+    // Stage 3b — CLIP vision pass. Optional, and a failure here must not lose
+    // the text evidence that is already in hand.
+    let visualClues: VisualClue[] = [];
+    if (useVision) {
+      try {
+        const { analyseFrames } = await import("@/lib/vision");
+        visualClues = await analyseFrames(raw, (p) => { setProgress(p); pushLog(p.detail); });
+        pushLog(`${visualClues.length} visual clues from CLIP`);
+      } catch (e: any) {
+        console.error("vision pass failed:", e);
+        pushLog(`Vision pass skipped: ${e?.message || e}`);
+        setExtractNote((n) => n ?? `The CLIP vision pass could not run (${e?.message || e}). Text evidence was used on its own.`);
+      }
+    }
+
     // Stage 4 — clue matching and geodata.
     try {
       setProgress({ stage: "geodata", detail: "Matching clues against open geodata", pct: 0.88 });
@@ -184,7 +206,7 @@ export default function Page() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          videoName: file.name, durationSec,
+          videoName: file.name, durationSec, visualClues,
           frames: complete.map((f) => ({ idx: f.idx, tSec: f.tSec, text: f.text, confidence: f.confidence, thumb: f.thumb })),
         }),
       });
@@ -231,6 +253,8 @@ export default function Page() {
     L.push(`\n## Method\n`);
     L.push(`- Keyframes: ${frames.length}, extracted via ${extractMethod}`);
     L.push(`- OCR scripts: ${langs.join(", ")}`);
+    L.push(`- Vision pass: ${useVision ? "CLIP ViT-B/32 in-browser" : "disabled"}`);
+    if (result.anchorCountry) L.push(`- Country anchor: ${result.anchorCountry.label} (${(result.anchorCountry.strength * 100).toFixed(0)}% of bias-free evidence)`);
     L.push(`- Gazetteer lookups: ${result.geocodeHits} resolved of ${result.geocodeAttempts} attempted (OpenStreetMap Nominatim)`);
     L.push(`\n## Candidates\n`);
     L.push(`| # | Region | Precision | Confidence | Band | Coordinates |`);
@@ -248,7 +272,7 @@ export default function Page() {
     });
     L.push(`\n## Recognised text by keyframe\n`);
     frames.forEach((f) => {
-      L.push(`\n**Frame ${f.idx + 1} — ${f.tSec.toFixed(1)}s** (OCR confidence ${f.confidence.toFixed(0)}%)\n`);
+      L.push(`\n**Frame ${f.idx + 1} — ${f.tSec.toFixed(1)}s** (quality ${f.quality}/100, OCR confidence ${f.confidence.toFixed(0)}%)\n`);
       L.push("```\n" + (f.text || "— nothing legible —") + "\n```");
     });
     if (shadow && activeCandidate && shadow.windows.length) {
@@ -278,6 +302,13 @@ export default function Page() {
           </span>
         </div>
         <div className="ml-auto flex items-stretch">
+          <a
+            href="/cases"
+            className="hidden items-center border-l border-ink-700 px-4 font-display text-sm font-semibold text-bone-400 hover:text-signal lg:flex"
+            data-testid="link-cases"
+          >
+            Saved
+          </a>
           <Chip on label="LOCAL" note="video stays in browser" />
           <Chip on={Boolean(result?.dbConfigured)} label="NEON" note={result ? (result.persisted ? "saved" : "write failed") : "standby"} />
           <Chip on label="OSM" note="gazetteer" />
@@ -322,6 +353,9 @@ export default function Page() {
                 <div className="flex items-center justify-between border-b border-ink-700 px-4 py-2">
                   <span className="marker">Candidate ledger</span>
                   <span className="flex gap-4">
+                    {result.persisted && (
+                      <a href={`/cases/${result.id}`} target="_blank" rel="noreferrer" className="marker text-bone-200 hover:text-signal" data-testid="link-share">Share link</a>
+                    )}
                     <button onClick={exportMarkdown} className="marker text-bone-200 hover:text-signal" data-testid="button-export-md">Report .md</button>
                     <button onClick={exportJson} className="marker text-bone-200 hover:text-signal" data-testid="button-export">Data .json</button>
                   </span>
@@ -427,6 +461,24 @@ export default function Page() {
                 </p>
               </div>
 
+              {mode === "deep" && (
+                <label className="block">
+                  <span className="marker mb-2 flex items-baseline justify-between">
+                    <span>Scene-change threshold</span>
+                    <span className="tabnum font-display text-xl font-bold text-bone-100">{sceneThreshold.toFixed(2)}</span>
+                  </span>
+                  <input
+                    type="range" min={0.05} max={0.6} step={0.01} value={sceneThreshold}
+                    onChange={(e) => setSceneThreshold(Number(e.target.value))}
+                    className="w-full" data-testid="input-scene-threshold"
+                  />
+                  <span className="mt-1.5 block text-xs leading-snug text-bone-600">
+                    Lower catches soft transitions and pans. Higher keeps only hard cuts. Falls back
+                    to even sampling if fewer than three cuts clear it.
+                  </span>
+                </label>
+              )}
+
               <label className="block">
                 <span className="marker mb-2 flex items-baseline justify-between">
                   <span>Keyframes</span>
@@ -463,8 +515,25 @@ export default function Page() {
                   Latin-only OCR will miss most South Asian signage. Each extra script pulls one language pack.
                 </p>
               </div>
-            </div>
 
+              <button
+                onClick={() => setUseVision((v) => !v)}
+                data-testid="button-vision"
+                className={`flex w-full items-center justify-between border px-3 py-2.5 text-left ${
+                  useVision ? "border-signal bg-signal/10" : "border-ink-600"
+                }`}
+              >
+                <span>
+                  <span className="block font-display text-sm font-semibold text-bone-100">Vision pass (CLIP)</span>
+                  <span className="mt-0.5 block text-xs text-bone-600">
+                    Recognises landmarks and streetscape signatures when there is no legible text
+                  </span>
+                </span>
+                <span className={`ml-3 shrink-0 font-mono text-[11px] ${useVision ? "text-signal" : "text-bone-600"}`}>
+                  {useVision ? "ON" : "OFF"}
+                </span>
+              </button>
+            </div>
             )}
 
             <button
@@ -514,6 +583,14 @@ export default function Page() {
                         {/* eslint-disable-next-line @next/next/no-img-element */}
                         <img src={f.thumb} alt={`Keyframe ${f.idx + 1}`} className="aspect-video w-full object-cover" />
                         <span className="tabnum absolute bottom-0 left-0 bg-ink-950 px-1 font-mono text-[10px] text-bone-200">{f.tSec.toFixed(1)}s</span>
+                        <span
+                          className={`tabnum absolute right-0 top-0 px-1 font-mono text-[10px] ${
+                            f.quality >= 55 ? "bg-ink-950 text-bone-400" : "bg-signal text-ink-950"
+                          }`}
+                          title={`Keyframe quality ${f.quality}/100 — focus and exposure. Low frames produce unreliable OCR and vision results.`}
+                        >
+                          {f.quality}
+                        </span>
                       </button>
                     ))}
                   </div>
@@ -523,7 +600,7 @@ export default function Page() {
                       <div className="flex items-baseline justify-between">
                         <p className="font-display text-xl font-bold leading-none">Frame {selectedFrame + 1}</p>
                         <p className="tabnum font-mono text-xs text-bone-400">
-                          OCR {frames[selectedFrame].confidence.toFixed(0)}% · green {(frames[selectedFrame].vegetationRatio * 100).toFixed(0)}% · luma {frames[selectedFrame].meanLuma.toFixed(0)}
+                          quality {frames[selectedFrame].quality}/100 · OCR {frames[selectedFrame].confidence.toFixed(0)}% · green {(frames[selectedFrame].vegetationRatio * 100).toFixed(0)}% · luma {frames[selectedFrame].meanLuma.toFixed(0)}
                         </p>
                       </div>
                       <pre className="mt-3 max-h-52 overflow-auto whitespace-pre-wrap break-words border border-ink-700 p-3 font-mono text-xs leading-relaxed text-bone-200">
@@ -574,6 +651,21 @@ export default function Page() {
                           </li>
                         ))}
                       </ul>
+                      {activeCandidate.bhuvanUrl && (
+                        <a
+                          href={activeCandidate.bhuvanUrl} target="_blank" rel="noreferrer"
+                          className="mt-4 block border border-ink-600 p-3 hover:border-signal"
+                          data-testid="link-bhuvan"
+                        >
+                          <span className="marker text-signal">Bhuvan · ISRO</span>
+                          <span className="mt-1 block text-xs leading-snug text-bone-400">
+                            Open this coordinate in India&apos;s national geoportal for terrain, land-use
+                            and satellite cross-checking. Authoritative Indian data that no Western
+                            dataset matches.
+                          </span>
+                        </a>
+                      )}
+
                       {activeCandidate.streetImages?.length ? (
                         <>
                           <p className="marker mb-2 mt-6">Street imagery nearby</p>

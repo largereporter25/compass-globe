@@ -19,6 +19,9 @@ type Body = {
   videoName?: string;
   durationSec?: number;
   frames: FramePayload[];
+  // Produced by the CLIP pass in the browser. The images themselves are never
+  // uploaded — only the resulting clue objects.
+  visualClues?: Clue[];
 };
 
 export async function POST(req: Request) {
@@ -36,6 +39,22 @@ export async function POST(req: Request) {
 
   const rawClues: Clue[] = [];
   for (const f of frames) rawClues.push(...extractClues(f.idx, f.text || ""));
+
+  const visual = Array.isArray(body.visualClues) ? body.visualClues : [];
+  for (const v of visual) {
+    if (!v || !["landmark", "scene", "environment"].includes(v.kind)) continue;
+    rawClues.push({
+      kind: v.kind,
+      frame: Number(v.frame) || 0,
+      value: String(v.value || "").slice(0, 160),
+      rationale: String(v.rationale || "").slice(0, 500),
+      candidates: Array.isArray(v.candidates) ? v.candidates.slice(0, 12) : [],
+      score: typeof v.score === "number" ? v.score : undefined,
+      lat: typeof v.lat === "number" ? v.lat : undefined,
+      lon: typeof v.lon === "number" ? v.lon : undefined,
+      countryCode: typeof v.countryCode === "string" ? v.countryCode : undefined,
+    });
+  }
 
   const result = await infer(rawClues);
   const id = randomUUID();

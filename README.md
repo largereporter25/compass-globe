@@ -47,7 +47,10 @@ video file (never uploaded)
    │
    ├─ 2. Tesseract.js ────── OCR per frame, in whichever scripts you select
    │
-   ├─ 3. clue extraction ─── deterministic matchers, no model inference:
+   ├─ 3. CLIP ViT-B/32 ───── landmark and streetscape recognition, in-browser,
+   │                         for the footage that has no legible text at all
+   │
+   ├─ 4. clue extraction ─── deterministic matchers over the recognised text:
    │        • Unicode script blocks       → country priors
    │        • Indian / UK plate formats   → state or country
    │        • +CC dialling prefixes       → country
@@ -55,20 +58,55 @@ video file (never uploaded)
    │        • currency signs              → country
    │        • capitalised tokens          → possible place names
    │
-   ├─ 4. country anchor ────────── script, plate, dialling code and ccTLD
-   │                               evidence fixes a country first
+   ├─ 5. country anchor ────────── script, plate, dialling code, ccTLD *and*
+   │                               CLIP streetscape signatures fix a country
    │
-   ├─ 5. OpenStreetMap Nominatim ─ place names resolved *inside* that country
+   ├─ 6. OpenStreetMap Nominatim ─ place names resolved *inside* that country
    │
-   ├─ 6. KartaView + Mapillary ─── street-level imagery near the lead candidate
+   ├─ 7. KartaView + Panoramax + Mapillary ─── street-level imagery near the lead candidate
    │
-   ├─ 7. weighted aggregation ──── ranked candidates + confidence band
+   ├─ 8. weighted aggregation ──── ranked candidates + confidence band
    │
-   ├─ 8. globe + reasoning trail ─ every candidate shows the clues that produced it
+   ├─ 9. globe + reasoning trail ─ every candidate shows the clues that produced it
    │
-   └─ 9. Shadowline ────────────── solar geometry turns a shadow direction
+   └─ 10. Shadowline ────────────── solar geometry turns a shadow direction
                                    into a time-of-day window
 ```
+
+### The vision pass — for footage with no text
+
+Most viral disinformation clips have no legible signage. A text-only pipeline
+has a hard ceiling there, so Compass Globe runs OpenAI's CLIP ViT-B/32 in the
+browser through transformers.js and scores every keyframe against two prompt
+banks in `lib/visual-priors.ts`:
+
+- **Landmarks** — distinctive built structures with real coordinates. A hit
+  here is the strongest clue the tool can produce, because it points at a place
+  rather than a region. The bar is deliberately high: a false landmark match is
+  the most misleading thing this tool could output, since it looks like
+  certainty.
+- **Streetscape signatures** — auto-rickshaws and overhead cable bundles, khaki
+  police uniforms, span-wire traffic signals, elevated railway girders, matatu
+  minibuses, scooter density, truck art. None is conclusive alone. Crucially
+  they are **gazetteer-free**, so they anchor a country exactly the way a plate
+  prefix does — which is what lets a clip with no text be anchored at all.
+
+A negative prompt bank (blurry frames, faces, blank walls, news studios) sits
+alongside them, because without unremarkable options to lose to, some landmark
+always "wins" a frame of nothing.
+
+Text embeddings for the whole bank are computed once and reused; each keyframe
+becomes a single image embedding and the rest is cosine similarity. That keeps
+a 200-prompt bank affordable on a laptop CPU. Weights download once from the
+Hugging Face CDN and are then cached — the images never leave the tab.
+
+**Tested:** a clip built only from Jantar Mantar photographs, with no readable
+text in any frame, returns *Jantar Mantar, New Delhi* and *Red Fort, Delhi* as
+the top two candidates, anchored to India. Both are red-sandstone Mughal-era
+Delhi structures, so the confusion between them is the honest one to make.
+
+This is a **second opinion, clearly separated in the UI**. CLIP is confidently
+wrong on a regular basis. It can be switched off entirely.
 
 ### Country anchoring — why this exists
 
@@ -150,7 +188,9 @@ correct. Bands are `Weak` / `Moderate` / `Strong`.
 | OCR | `tesseract.js` | Runs client-side, ~20 scripts, no key |
 | Clue engine | Plain TypeScript in `lib/clues.ts` | Deterministic and auditable beats opaque and slightly better |
 | Gazetteer | OpenStreetMap Nominatim | Free, keyless, ODbL |
-| Street imagery | KartaView (keyless) + Mapillary (optional token) | CC BY-SA, complementary Global South coverage, works with zero configuration |
+| Vision | CLIP ViT-B/32 via `@xenova/transformers`, in-browser | Landmark and streetscape recognition without a paid vision API |
+| Street imagery | KartaView + Panoramax (keyless) + Mapillary (optional token) | CC BY-SA, complementary Global South coverage, works with zero configuration |
+| India terrain | Bhuvan (ISRO) deep link | Authoritative Indian satellite and land-use data, opened for manual cross-check |
 | Globe | `react-globe.gl` / three.js | Hex-polygon countries, confidence-scaled points |
 | Database | Neon Postgres over HTTP | Serverless-friendly; app degrades gracefully without it |
 
@@ -162,11 +202,14 @@ app/
 lib/
   pipeline.ts               browser-side extraction + Tesseract + frame stats
   sun.ts                    NOAA solar position and shadow-window solver
+  vision.ts                 CLIP embedding pass, runs in the browser
+  visual-priors.ts          landmark and streetscape prompt banks (plain data)
   clues.ts                  deterministic clue matchers
   regions.ts                centroids, plate prefixes, dialling codes, script priors
-  geo.ts                    Nominatim + Mapillary + KartaView clients
+  geo.ts                    Nominatim, Mapillary, KartaView, Panoramax, Bhuvan
   infer.ts                  evidence weighting and ranking
   db.ts                     Neon client + schema
+app/cases/                  saved investigation browser and shareable records
 components/Globe.tsx        three.js globe
 scripts/init-db.mjs         one-shot schema bootstrap
 scripts/make-test-clip.py   generates a synthetic signage clip for testing
@@ -232,6 +275,9 @@ python3 scripts/make-test-clip.py     # writes ./test-clip.mp4
 - **The country anchor can be wrong.** If it is, the right answer is demoted rather than removed — read the `conflicts` rows.
 - **Anchoring needs bias-free evidence.** A clip with nothing but generic Latin signage has nothing to anchor on, and stays vulnerable to gazetteer skew.
 - **Green-pixel share and luma are observations only.** They are displayed, never scored.
+- **CLIP is confidently wrong.** A landmark match is a visual similarity score, not an identification. Always confirm against a reference photograph.
+- **The landmark bank is small and unevenly distributed.** A place that is not in it cannot be recognised, and absence means nothing.
+- **The vision pass is slow on CPU.** Expect a minute or more for a first run while weights download.
 - **Shadow timing assumes the date you enter** and a flat, unobstructed horizon.
 - **Shadowline times are a solar clock,** not a wall clock. Convert before comparing to a claimed timestamp.
 
@@ -245,12 +291,17 @@ The UI states all of this in the "Method and limits" panel. Please leave it ther
 - [x] Sun-angle / shadow time estimation from a candidate coordinate (Shadowline)
 - [x] KartaView alongside Mapillary, working without any API key
 - [x] Markdown evidence report alongside the JSON bundle
-- [ ] Panoramax as a third open imagery source
-- [ ] Bhuvan (ISRO) layers for India-specific terrain and land-use cross-checking
-- [ ] Local GeoCLIP / StreetCLIP inference as a second, clearly-separated opinion
-- [ ] Saved investigation browser and shareable case links
-- [ ] Scene-change threshold exposed in the UI, with a keyframe-quality score
-- [ ] Community-contributed regional signage patterns beyond India and the UK
+- [x] Country anchoring to defeat the gazetteer's Global North bias
+- [x] In-browser CLIP inference as a second, clearly-separated visual opinion
+- [x] Landmark recognition with real coordinates
+- [x] Panoramax as a third open imagery source
+- [x] Bhuvan (ISRO) deep link for India-specific terrain cross-checking
+- [x] Saved investigation browser and shareable case links
+- [x] Scene-change threshold exposed in the UI, plus a keyframe-quality score
+- [ ] Bhuvan WMS layers rendered in-app rather than linked out
+- [ ] A larger landmark bank — the current one is ~70 entries and needs hundreds
+- [ ] GeoCLIP proper (needs an ONNX export; no browser-runnable build exists yet)
+- [ ] Community-contributed regional signage patterns beyond India, UK and the US
 
 ## Contributing
 
@@ -258,6 +309,12 @@ The clue engine is the part worth extending, and it needs no machine learning kn
 expertise. Registration-plate formats, script priors, dialling codes and gazetteer stopwords all live
 in `lib/regions.ts` and `lib/clues.ts` as plain data. If you know how plates or signage work in your
 country, that is a directly useful pull request.
+
+**The prompt banks in `lib/visual-priors.ts` are the easiest and most valuable place to contribute.**
+They are plain data — a description string, a note, and the regions it implies. If you know what the
+street furniture, police uniforms, utility poles, number plates or bus liveries look like where you
+work, that is a directly useful pull request and needs no machine-learning knowledge. The landmark
+bank is currently ~70 entries and is heavily under-covered outside India, the US and Europe.
 
 Two rules: no paid or proprietary vision APIs, and no clue may be added without a human-readable
 `rationale` string explaining it.

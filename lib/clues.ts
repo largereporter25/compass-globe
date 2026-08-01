@@ -5,13 +5,17 @@
 import { CALLING_CODES, CCTLDS, CURRENCY_SIGNS, IN_STATES, SCRIPT_PRIORS } from "./regions";
 
 export type Clue = {
-  kind: "script" | "plate" | "phone" | "domain" | "currency" | "toponym";
+  kind: "script" | "plate" | "phone" | "domain" | "currency" | "toponym" | "landmark" | "scene" | "environment";
   frame: number;          // keyframe index the clue came from
   value: string;          // the literal evidence, e.g. "GJ 01 KA 4321"
   rationale: string;      // plain-language explanation
   candidates: { key: string; w: number }[]; // region key -> weight contribution
   needsGeocode?: boolean; // toponyms are resolved against OpenStreetMap later
   priority?: number;      // ordering hint for the limited geocoding budget
+  score?: number;         // CLIP similarity share, for visual clues
+  lat?: number;           // landmark clues carry their own coordinates
+  lon?: number;
+  countryCode?: string;
 };
 
 const PLATE_IN = /\b([A-Z]{2})[\s-]?(\d{1,2})[\s-]?([A-Z]{1,3})[\s-]?(\d{3,4})\b/g;

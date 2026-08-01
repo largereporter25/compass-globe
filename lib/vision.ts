@@ -1,0 +1,201 @@
+"use client";
+
+// CLIP vision pass — the layer that works when there is no legible text.
+//
+// Runs OpenAI's CLIP ViT-B/32 entirely in the browser through transformers.js
+// (ONNX Runtime Web). The model weights are fetched once from the Hugging Face
+// CDN and cached by the browser; after that it is fully offline, and the image
+// data never leaves the tab.
+//
+// The approach is deliberate: text embeddings for the whole prompt bank are
+// computed once and reused, then each keyframe becomes a single image
+// embedding and everything is cosine similarity. That keeps a 200-prompt bank
+// affordable on a laptop CPU, where the naive zero-shot pipeline would
+// re-encode every prompt for every frame.
+//
+// This is explicitly a *second opinion*, kept separate from the text evidence
+// in the UI. CLIP is confidently wrong on a regular basis and the interface
+// says so.
+
+import {
+  AutoProcessor,
+  AutoTokenizer,
+  CLIPTextModelWithProjection,
+  CLIPVisionModelWithProjection,
+  RawImage,
+  env,
+} from "@xenova/transformers";
+import { LANDMARKS, NEGATIVE_PROMPTS, SCENE_PRIORS } from "./visual-priors";
+import type { Progress } from "./pipeline";
+
+// No local model server; pull from the CDN once, then rely on browser cache.
+env.allowLocalModels = false;
+
+const MODEL_ID = "Xenova/clip-vit-base-patch32";
+
+export type VisualClue = {
+  kind: "landmark" | "scene" | "environment";
+  frame: number;
+  value: string;
+  rationale: string;
+  score: number;
+  candidates: { key: string; w: number }[];
+  lat?: number;
+  lon?: number;
+  countryCode?: string;
+};
+
+type Bank = {
+  prompts: string[];
+  textEmbeddings: number[][];
+};
+
+let cached: {
+  tokenizer: any;
+  processor: any;
+  textModel: any;
+  visionModel: any;
+  bank: Bank;
+} | null = null;
+
+function l2normalize(v: number[]): number[] {
+  let n = 0;
+  for (const x of v) n += x * x;
+  n = Math.sqrt(n) || 1;
+  return v.map((x) => x / n);
+}
+
+function dot(a: number[], b: number[]): number {
+  let s = 0;
+  for (let i = 0; i < a.length; i++) s += a[i] * b[i];
+  return s;
+}
+
+function softmax(xs: number[], temperature = 100): number[] {
+  const scaled = xs.map((x) => x * temperature);
+  const max = Math.max(...scaled);
+  const exps = scaled.map((x) => Math.exp(x - max));
+  const sum = exps.reduce((a, b) => a + b, 0) || 1;
+  return exps.map((e) => e / sum);
+}
+
+/** Every prompt the model scores against, in a fixed order. */
+function allPrompts(): string[] {
+  return [
+    ...LANDMARKS.map((l) => l.prompt),
+    ...SCENE_PRIORS.map((s) => s.prompt),
+    ...NEGATIVE_PROMPTS,
+  ];
+}
+
+export async function loadVision(onProgress: (p: Progress) => void) {
+  if (cached) return cached;
+
+  onProgress({ stage: "vision", detail: "Loading the CLIP vision model (first run downloads it once)", pct: 0.5 });
+
+  const [tokenizer, processor, textModel, visionModel] = await Promise.all([
+    AutoTokenizer.from_pretrained(MODEL_ID),
+    AutoProcessor.from_pretrained(MODEL_ID),
+    CLIPTextModelWithProjection.from_pretrained(MODEL_ID, { quantized: true }),
+    CLIPVisionModelWithProjection.from_pretrained(MODEL_ID, { quantized: true }),
+  ]);
+
+  onProgress({ stage: "vision", detail: "Encoding the visual clue bank", pct: 0.56 });
+
+  const prompts = allPrompts();
+  const textEmbeddings: number[][] = [];
+  // Batched so a long bank does not blow the WASM heap in one allocation.
+  const BATCH = 24;
+  for (let i = 0; i < prompts.length; i += BATCH) {
+    const slice = prompts.slice(i, i + BATCH);
+    const inputs = tokenizer(slice, { padding: true, truncation: true });
+    const { text_embeds } = await textModel(inputs);
+    const [rows, cols] = text_embeds.dims as [number, number];
+    const data = text_embeds.data as Float32Array;
+    for (let r = 0; r < rows; r++) {
+      textEmbeddings.push(l2normalize(Array.from(data.slice(r * cols, (r + 1) * cols))));
+    }
+  }
+
+  cached = { tokenizer, processor, textModel, visionModel, bank: { prompts, textEmbeddings } };
+  return cached;
+}
+
+/** Score one frame against the whole bank and return the clues worth keeping. */
+async function scoreFrame(ctx: NonNullable<typeof cached>, blob: Blob, frameIndex: number): Promise<VisualClue[]> {
+  const image = await RawImage.fromBlob(blob);
+  const inputs = await ctx.processor(image);
+  const { image_embeds } = await ctx.visionModel(inputs);
+  const imageEmbedding = l2normalize(Array.from(image_embeds.data as Float32Array));
+
+  const sims = ctx.bank.textEmbeddings.map((t) => dot(imageEmbedding, t));
+  const probs = softmax(sims);
+
+  const nLandmarks = LANDMARKS.length;
+  const nScenes = SCENE_PRIORS.length;
+  const out: VisualClue[] = [];
+
+  // Landmarks. A high bar on purpose — a false landmark hit is the single most
+  // misleading thing this tool could output, because it looks like certainty.
+  let bestLandmark = -1;
+  for (let i = 0; i < nLandmarks; i++) {
+    if (bestLandmark < 0 || probs[i] > probs[bestLandmark]) bestLandmark = i;
+  }
+  if (bestLandmark >= 0 && probs[bestLandmark] >= 0.22) {
+    const lm = LANDMARKS[bestLandmark];
+    out.push({
+      kind: "landmark",
+      frame: frameIndex,
+      value: lm.label,
+      rationale: `CLIP matched this frame to "${lm.prompt}" at ${(probs[bestLandmark] * 100).toFixed(0)}% of the bank's total score. Visual match only — confirm against a reference photograph before relying on it.`,
+      score: Number(probs[bestLandmark].toFixed(4)),
+      candidates: [{ key: lm.countryCode, w: 0.5 }],
+      lat: lm.lat,
+      lon: lm.lon,
+      countryCode: lm.countryCode,
+    });
+  }
+
+  // Streetscape signatures. Lower bar: these are meant to accumulate across
+  // frames rather than decide anything alone.
+  const sceneScores = SCENE_PRIORS.map((s, i) => ({ s, p: probs[nLandmarks + i] }));
+  sceneScores.sort((a, b) => b.p - a.p);
+  for (const { s, p } of sceneScores.slice(0, 3)) {
+    if (p < 0.05) continue;
+    const isEnvironment = s.candidates.length === 0;
+    out.push({
+      kind: isEnvironment ? "environment" : "scene",
+      frame: frameIndex,
+      value: s.note,
+      rationale: isEnvironment
+        ? `CLIP scored this frame ${(p * 100).toFixed(0)}% against "${s.prompt}". Recorded as an observation only — environment is never used to score a location.`
+        : `CLIP scored this frame ${(p * 100).toFixed(0)}% against "${s.prompt}". Streetscape signatures are suggestive, not conclusive.`,
+      score: Number(p.toFixed(4)),
+      // Scale the prior by how strongly the frame actually matched.
+      candidates: s.candidates.map((c) => ({ key: c.key, w: Number((c.w * Math.min(p / 0.25, 1)).toFixed(4)) })),
+    });
+  }
+
+  return out;
+}
+
+export async function analyseFrames(
+  frames: { idx: number; blob: Blob }[],
+  onProgress: (p: Progress) => void
+): Promise<VisualClue[]> {
+  const ctx = await loadVision(onProgress);
+  const clues: VisualClue[] = [];
+  for (let i = 0; i < frames.length; i++) {
+    onProgress({
+      stage: "vision",
+      detail: `Looking at keyframe ${i + 1} of ${frames.length}`,
+      pct: 0.58 + (i / frames.length) * 0.2,
+    });
+    try {
+      clues.push(...(await scoreFrame(ctx, frames[i].blob, frames[i].idx)));
+    } catch {
+      // One unreadable frame must not sink the pass.
+    }
+  }
+  return clues;
+}
