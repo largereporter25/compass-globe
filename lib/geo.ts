@@ -15,32 +15,55 @@ export type GeocodeHit = {
   importance: number;
   osmType: string;
   osmClass: string;
+  restrictedToCountry?: boolean;
 };
 
 // Nominatim's usage policy caps automated use at ~1 request/second. We queue
 // strictly and cap the number of lookups per investigation.
 let lastCall = 0;
-async function throttle(ms = 1100) {
+async function throttle(ms = 950) {
   const wait = lastCall + ms - Date.now();
   if (wait > 0) await new Promise((r) => setTimeout(r, wait));
   lastCall = Date.now();
 }
 
-export async function geocode(name: string): Promise<GeocodeHit | null> {
+export async function geocode(name: string, preferCountry?: string | null): Promise<GeocodeHit | null> {
   await throttle();
-  const url =
-    "https://nominatim.openstreetmap.org/search?" +
-    new URLSearchParams({ q: name, format: "jsonv2", limit: "1", addressdetails: "1" });
+  const params: Record<string, string> = {
+    q: name,
+    format: "jsonv2",
+    limit: "5",
+    addressdetails: "1",
+  };
+  // When other evidence already points at a country, ask Nominatim inside it.
+  // Without this the gazetteer's density bias wins: OSM has far more mapped
+  // features in Western Europe than in South Asia, so a generic token like
+  // "Parliament Street" resolves to London before it resolves to New Delhi.
+  if (preferCountry) params.countrycodes = preferCountry.toLowerCase();
+
+  const url = "https://nominatim.openstreetmap.org/search?" + new URLSearchParams(params);
   try {
     const res = await fetch(url, { headers: { "User-Agent": UA, "Accept-Language": "en" } });
     if (!res.ok) return null;
     const rows = (await res.json()) as any[];
-    const r = rows?.[0];
-    if (!r) return null;
-    // jsonv2 returns the feature class under `category`; older formats use `class`.
+    if (!Array.isArray(rows) || !rows.length) return null;
+
+    const usable = rows.filter((r) => {
+      // jsonv2 returns the feature class under `category`; older formats use `class`.
+      const cls = (r.category || r.class) as string;
+      return ["place", "boundary", "highway", "natural", "landuse", "waterway"].includes(cls);
+    });
+    if (!usable.length) return null;
+
+    // Settlements and administrative areas beat an incidental street match.
+    const rank = (r: any) => {
+      const type = String(r.addresstype || r.type || "");
+      const settlement = ["city", "town", "state", "country", "county", "district", "suburb", "village", "municipality"].includes(type);
+      return (settlement ? 1 : 0) * 2 + (typeof r.importance === "number" ? r.importance : 0.3);
+    };
+    const r = usable.sort((a, b) => rank(b) - rank(a))[0];
+
     const cls = (r.category || r.class) as string;
-    // Only accept results that are actually places, not shops or brands.
-    if (!["place", "boundary", "highway", "natural", "landuse", "waterway"].includes(cls)) return null;
     return {
       name,
       displayName: r.display_name,
@@ -50,6 +73,7 @@ export async function geocode(name: string): Promise<GeocodeHit | null> {
       importance: typeof r.importance === "number" ? r.importance : 0.3,
       osmType: r.addresstype || r.type || cls,
       osmClass: cls,
+      restrictedToCountry: Boolean(preferCountry),
     };
   } catch {
     return null;

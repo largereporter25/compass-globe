@@ -11,6 +11,7 @@ export type Clue = {
   rationale: string;      // plain-language explanation
   candidates: { key: string; w: number }[]; // region key -> weight contribution
   needsGeocode?: boolean; // toponyms are resolved against OpenStreetMap later
+  priority?: number;      // ordering hint for the limited geocoding budget
 };
 
 const PLATE_IN = /\b([A-Z]{2})[\s-]?(\d{1,2})[\s-]?([A-Z]{1,3})[\s-]?(\d{3,4})\b/g;
@@ -21,19 +22,36 @@ const DOMAIN = /\b(?:[a-z0-9-]+\.)+([a-z]{2,4})\b/gi;
 // Tokens that look like proper nouns worth asking OpenStreetMap about.
 const TOPONYM = /\b([A-Z][A-Za-z]{3,}(?:[ \t]+[A-Z][A-Za-z]{2,}){0,2})\b/g;
 const TOPONYM_STOPWORDS = new Set([
-  "THE", "AND", "FOR", "WITH", "FROM", "THIS", "THAT", "YOUR", "OPEN", "CLOSED",
-  "SALE", "FREE", "NEWS", "LIVE", "PRESS", "STOP", "EXIT", "ENTER", "PARKING",
-  "WELCOME", "PLEASE", "CAUTION", "WARNING", "DANGER", "POLICE", "HOSPITAL",
-  "SCHOOL", "HOTEL", "RESTAURANT", "BANK", "PHARMACY", "MARKET", "STORE",
+  // Function words and generic signage.
+  "THE", "AND", "FOR", "WITH", "FROM", "THIS", "THAT", "YOUR", "ALWAYS", "NOT",
+  "OPEN", "CLOSED", "SALE", "FREE", "NEWS", "LIVE", "PRESS", "STOP", "EXIT",
+  "ENTER", "ENTRY", "PARKING", "WELCOME", "PLEASE", "CAUTION", "WARNING",
+  "DANGER", "NOTICE", "PROHIBITED", "RESTRICTED", "AUTHORISED", "AUTHORIZED",
+  // Buildings, facilities and civic vocabulary. These match a street or an
+  // amenity in almost every city on Earth, and OSM is far denser in Europe
+  // than in South Asia, so leaving them in drags every result westward.
+  "POLICE", "HOSPITAL", "SCHOOL", "HOTEL", "RESTAURANT", "BANK", "PHARMACY",
+  "MARKET", "STORE", "STATION", "TERMINAL", "AIRPORT", "DEPOT", "GARAGE",
   "COMPANY", "LIMITED", "PRIVATE", "SERVICES", "SOLUTIONS", "CENTRE", "CENTER",
-  // Generic institutional and commercial words. Left in, they geocode to
-  // arbitrary streets on the other side of the planet and pollute the ledger.
   "MUNICIPAL", "CORPORATION", "GOVERNMENT", "AUTHORITY", "DEPARTMENT",
   "DEVELOPMENT", "INTERNATIONAL", "NATIONAL", "GENERAL", "SPECIAL", "OFFICIAL",
   "MEDICAL", "DENTAL", "TRAVELS", "TRADERS", "ENTERPRISE", "ENTERPRISES",
   "INDUSTRIES", "ELECTRIC", "ELECTRONICS", "FURNITURE", "JEWELLERS", "TAILORS",
   "OPTICAL", "COMPUTERS", "MOBILE", "DIGITAL", "STUDIO", "ACADEMY", "COLLEGE",
   "INSTITUTE", "LIBRARY", "SUPER", "GRAND", "ROYAL", "GOLDEN", "CLASSIC",
+  // Ranks, units and desk furniture — extremely common on protest and
+  // policing footage, and pure noise for a gazetteer.
+  "CONTROL", "ROOM", "COMMAND", "HEADQUARTERS", "OFFICE", "OFFICER", "OFFICERS",
+  "COMMISSIONER", "SUPERINTENDENT", "INSPECTOR", "CONSTABLE", "DEPUTY",
+  "ASSISTANT", "SENIOR", "JUNIOR", "RESERVE", "BATTALION", "SQUAD", "PATROL",
+  "MARSHAL", "SECURITY", "GUARD", "BARRICADE", "CHECKPOINT", "CORDON",
+  "EMERGENCY", "RESPONSE", "RESCUE", "AMBULANCE", "GRIEVANCE", "PUBLIC",
+  "HELP", "DESK", "COUNTER", "RECEPTION", "VISITOR", "STAFF", "CELL", "UNIT",
+  "DIVISION", "BRANCH", "SECTION", "WING", "TRAFFIC", "LINE", "POINT", "CROSS",
+  // Address components. Kept out on their own, but still allowed inside a
+  // phrase, because "Parliament Street" is a real road in New Delhi.
+  "STREET", "ROAD", "AVENUE", "LANE", "MARG", "PATH", "GATE", "BLOCK",
+  "SECTOR", "PHASE", "PLOT", "FLOOR", "BUILDING", "TOWER", "COMPLEX",
 ]);
 
 function uniq<T>(arr: T[], keyer: (t: T) => string): T[] {
@@ -132,16 +150,22 @@ export function extractClues(frameIndex: number, rawText: string): Clue[] {
 
   // 6. Candidate place names, resolved later against OpenStreetMap.
   const seenNames = new Set<string>();
+  const isStop = (w: string) => TOPONYM_STOPWORDS.has(w.toUpperCase());
+
   for (const m of Array.from(text.matchAll(TOPONYM))) {
     const phrase = m[1].trim();
-    // Query the whole phrase and its individual words. "ASHRAM ROAD Ahmedabad"
-    // may fail as one string while "Ahmedabad" resolves cleanly.
     const words = phrase.split(/\s+/);
+    // Query the whole phrase and its individual words. "DELHI POLICE" fails as
+    // a phrase while "Delhi" resolves cleanly, so both have to be tried.
     const variants = words.length > 1 ? [phrase, ...words] : [phrase];
+
     for (const name of variants) {
       if (name.length < 5 || name.length > 40) continue;
-      if (TOPONYM_STOPWORDS.has(name.toUpperCase())) continue;
-      if (name.split(/\s+/).every((w) => TOPONYM_STOPWORDS.has(w.toUpperCase()))) continue;
+      if (isStop(name)) continue;
+      const parts = name.split(/\s+/);
+      // Drop a phrase once half or more of it is generic vocabulary. Its
+      // distinctive word is still queried on its own.
+      if (parts.length > 1 && parts.filter(isStop).length / parts.length >= 0.5) continue;
       if (seenNames.has(name.toUpperCase())) continue;
       seenNames.add(name.toUpperCase());
       clues.push({
@@ -151,6 +175,9 @@ export function extractClues(frameIndex: number, rawText: string): Clue[] {
         rationale: "Possible place name read from signage. Checked against the OpenStreetMap gazetteer.",
         candidates: [],
         needsGeocode: true,
+        // Single distinctive proper nouns resolve far more reliably than long
+        // strings of signage text, so they are queried first.
+        priority: (parts.length === 1 ? 2 : 0) + (name === name.toUpperCase() ? 0.5 : 0),
       });
     }
   }

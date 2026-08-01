@@ -55,17 +55,48 @@ video file (never uploaded)
    │        • currency signs              → country
    │        • capitalised tokens          → possible place names
    │
-   ├─ 4. OpenStreetMap Nominatim ─ resolves place names to real coordinates
+   ├─ 4. country anchor ────────── script, plate, dialling code and ccTLD
+   │                               evidence fixes a country first
    │
-   ├─ 5. KartaView + Mapillary ─── street-level imagery near the lead candidate
+   ├─ 5. OpenStreetMap Nominatim ─ place names resolved *inside* that country
    │
-   ├─ 6. weighted aggregation ──── ranked candidates + confidence band
+   ├─ 6. KartaView + Mapillary ─── street-level imagery near the lead candidate
    │
-   ├─ 7. globe + reasoning trail ─ every candidate shows the clues that produced it
+   ├─ 7. weighted aggregation ──── ranked candidates + confidence band
    │
-   └─ 8. Shadowline ────────────── solar geometry turns a shadow direction
+   ├─ 8. globe + reasoning trail ─ every candidate shows the clues that produced it
+   │
+   └─ 9. Shadowline ────────────── solar geometry turns a shadow direction
                                    into a time-of-day window
 ```
+
+### Country anchoring — why this exists
+
+OpenStreetMap is not evenly mapped. Western Europe has vastly more named
+features than South Asia, Africa or Latin America, so a generic token read off
+signage resolves westward by default. Real example from testing: footage shot at
+Jantar Mantar in New Delhi, with "Delhi Police" clearly legible, ranked
+**Westminster, London** first — because "Parliament Street Station" matched a
+London feature before "Delhi" was ever queried.
+
+Three things fix that, and they are the difference between a toy and a tool:
+
+1. **Anchor the country from bias-free evidence first.** Writing system, plate
+   prefix, dialling code, ccTLD and currency sign carry no gazetteer skew. If
+   they agree on a country by a clear majority, that becomes the anchor.
+2. **Query inside the anchor.** Nominatim is called with `countrycodes=` so
+   "Parliament Street" resolves to Sansad Marg in New Delhi, not to London.
+3. **Demote, don't delete, conflicts.** A candidate outside the anchor keeps its
+   place in the ledger flagged `conflicts` and scaled to 18% weight, because the
+   anchor can be wrong and hiding the alternative would be dishonest.
+
+Alongside that, the place-name extractor now discards a phrase once half or more
+of its words are generic civic vocabulary — "Commissioner Office", "Traffic
+Marshal Point", "Police Control Room" — and spends its limited lookup budget on
+single distinctive proper nouns first. On the Delhi test that cut 32 junk
+toponyms down to 2 useful ones and moved the top result from London to New
+Delhi. The clean-text version of the same clip now surfaces **Jantar Mantar
+Astronomical Observatory** directly.
 
 ### Two extraction modes
 
@@ -198,6 +229,8 @@ python3 scripts/make-test-clip.py     # writes ./test-clip.mp4
 - **Confidence is a share of recovered evidence weight,** not a probability of being correct.
 - **Region markers sit on centroids.** They mark a hypothesis area, never a camera position.
 - **The gazetteer produces false positives.** Generic words get filtered, but not perfectly.
+- **The country anchor can be wrong.** If it is, the right answer is demoted rather than removed — read the `conflicts` rows.
+- **Anchoring needs bias-free evidence.** A clip with nothing but generic Latin signage has nothing to anchor on, and stays vulnerable to gazetteer skew.
 - **Green-pixel share and luma are observations only.** They are displayed, never scored.
 - **Shadow timing assumes the date you enter** and a flat, unobstructed horizon.
 - **Shadowline times are a solar clock,** not a wall clock. Convert before comparing to a claimed timestamp.
