@@ -85,7 +85,7 @@ export type StreetImage = {
   thumb: string;
   lat: number;
   lon: number;
-  source: "Mapillary" | "KartaView" | "Panoramax";
+  source: "Mapillary" | "KartaView" | "Panoramax" | "Sentinel-2";
   link: string;
   capturedAt?: string;
 };
@@ -205,6 +205,88 @@ export async function panoramaxNear(lat: number, lon: number, radiusDeg = 0.006)
         };
       })
       .filter(Boolean) as StreetImage[];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Copernicus Data Space Ecosystem — optional, account-gated high-resolution
+ * cross-check. Sentinel-2 L2A (10 m) is the only source here with finer
+ * resolution than the keyless basemaps, but it needs a free OAuth client from
+ * dataspace.copernicus.eu, so it is entirely optional: with no
+ * COPERNICUS_CLIENT_ID / COPERNICUS_CLIENT_SECRET this returns [] and the rest
+ * of the app is unaffected. Credentials never reach the browser — this runs
+ * server-side inside the analysis route, and only the resulting scene preview
+ * (a base64 quicklook the catalogue returns inline via $expand=Quicklook) is
+ * passed back, surfaced as another entry in the existing street-imagery grid.
+ */
+let copToken: { token: string; exp: number } | null = null;
+async function copernicusToken(): Promise<string | null> {
+  const id = process.env.COPERNICUS_CLIENT_ID;
+  const secret = process.env.COPERNICUS_CLIENT_SECRET;
+  if (!id || !secret) return null;
+  const now = Date.now();
+  if (copToken && copToken.exp > now + 60_000) return copToken.token;
+  try {
+    const body = new URLSearchParams({
+      grant_type: "client_credentials",
+      client_id: id,
+      client_secret: secret,
+    });
+    const res = await fetch(
+      "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token",
+      { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body }
+    );
+    if (!res.ok) return null;
+    const j = (await res.json()) as any;
+    copToken = { token: j.access_token, exp: now + (Number(j.expires_in) || 300) * 1000 };
+    return copToken.token;
+  } catch {
+    return null;
+  }
+}
+
+export async function copernicusNear(lat: number, lon: number): Promise<StreetImage[]> {
+  const token = await copernicusToken();
+  if (!token) return [];
+  // A ~11 km box around the coordinate. WKT is lon/lat order.
+  const d = 0.05;
+  const wkt = `POLYGON((${lon - d} ${lat - d},${lon + d} ${lat - d},${lon + d} ${lat + d},${lon - d} ${lat + d},${lon - d} ${lat - d}))`;
+  const start = new Date(Date.now() - 120 * 86_400_000).toISOString();
+  const end = new Date().toISOString();
+  const filter = [
+    "Collection/Name eq 'SENTINEL-2'",
+    "Attributes/OData.CSC.StringAttribute/any(att:att/Name eq 'productType' and att/OData.CSC.StringAttribute/Value eq 'S2MSI2A')",
+    "Attributes/OData.CSC.DoubleAttribute/any(att:att/Name eq 'cloudCover' and att/OData.CSC.DoubleAttribute/Value le 25.00)",
+    `OData.CSC.Intersects(area=geography'SRID=4326;${wkt}')`,
+    `ContentDate/Start gt ${start}`,
+    `ContentDate/Start lt ${end}`,
+  ].join(" and ");
+  const url =
+    "https://catalogue.dataspace.copernicus.eu/odata/v1/Products?$filter=" +
+    encodeURIComponent(filter) +
+    "&$top=1&$expand=Quicklook,Attributes&$orderby=ContentDate/Start desc";
+  try {
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return [];
+    const j = (await res.json()) as any;
+    const prod = j?.value?.[0];
+    if (!prod || !prod.Quicklook) return [];
+    return [
+      {
+        id: String(prod.Id),
+        thumb: `data:image/jpeg;base64,${prod.Quicklook}`,
+        lat,
+        lon,
+        source: "Sentinel-2",
+        link: `https://browser.dataspace.copernicus.eu/?lat=${lat.toFixed(4)}&lng=${lon.toFixed(4)}&zoom=12`,
+        capturedAt: prod.ContentDate?.Start ? String(prod.ContentDate.Start).slice(0, 10) : undefined,
+      },
+    ];
   } catch {
     return [];
   }

@@ -14,7 +14,7 @@
 
 import type { Clue } from "./clues";
 import { dedupeClues } from "./clues";
-import { bhuvanLink, geocode, kartaviewNear, mapillaryNear, panoramaxNear, type StreetImage } from "./geo";
+import { bhuvanLink, copernicusNear, geocode, kartaviewNear, mapillaryNear, panoramaxNear, type StreetImage } from "./geo";
 import { resolveRegion } from "./regions";
 
 export type Candidate = {
@@ -244,12 +244,16 @@ export async function infer(rawClues: Clue[]): Promise<InferenceResult> {
     top.find((c) => c.precision === "locality" && c.coherence !== "conflicts") ??
     top.find((c) => c.precision === "sub-national");
   if (imageryTarget) {
-    const [mly, kv, pnx] = await Promise.all([
+    const [mly, kv, pnx, cop] = await Promise.all([
       mapillaryNear(imageryTarget.lat, imageryTarget.lon),
       kartaviewNear(imageryTarget.lat, imageryTarget.lon),
       panoramaxNear(imageryTarget.lat, imageryTarget.lon),
+      copernicusNear(imageryTarget.lat, imageryTarget.lon),
     ]);
-    const imgs = [...mly, ...kv, ...pnx].slice(0, 6);
+    // Copernicus Sentinel-2 is the highest-resolution source in the grid, so it
+    // leads when configured; without credentials it is [] and the order is
+    // unchanged, so a default deploy sees no difference.
+    const imgs = [...cop, ...mly, ...kv, ...pnx].slice(0, 6);
     if (imgs.length) imageryTarget.streetImages = imgs;
   }
 

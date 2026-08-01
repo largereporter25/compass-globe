@@ -140,9 +140,19 @@ than a dot on a diagram:
 
 | Layer | Source | Licence |
 | --- | --- | --- |
-| Satellite | Esri World Imagery (Maxar, Earthstar Geographics) | Free with attribution, no key |
+| Satellite | NASA GIBS — MODIS Terra daily true-color | NASA open data, keyless |
+| VIIRS | NASA GIBS — NOAA-20 VIIRS daily true-color | NASA open data, keyless |
+| Sentinel-2 | EOX Sentinel-2 cloudless (2016/2017 mosaic) | CC BY 4.0, keyless |
+| Esri | Esri World Imagery (Maxar, Earthstar Geographics) | Free with attribution, **non-commercial use only** per Esri terms |
 | Street | OpenStreetMap standard tiles | ODbL |
 | Terrain | OpenTopoMap with SRTM elevation | CC BY-SA |
+
+The default `Satellite` layer is live NASA GIBS (daily, ~250 m) rather than a
+frozen mosaic. GIBS tiles are pinned to a UTC date a couple of days back because
+its EPSG:3857 REST endpoint 404s on the `default` time token. For a sharper,
+cloudless static basemap use `Sentinel-2`; for the highest-resolution street
+detail (or where a candidate must be read at road level) switch to `Esri` or
+`Sentinel-2` before descending — GIBS' 250 m resolution caps out at zoom 9.
 
 Selecting a candidate flies the camera to district altitude; **Descend to
 street** drops it to roughly a kilometre up, close enough to read a road layout
@@ -300,6 +310,8 @@ python3 scripts/make-test-clip.py     # writes ./test-clip.mp4
 | `DATABASE_URL` | No | Neon Postgres pooled connection string. Without it, analysis still runs and the header says `Neon not configured`; nothing is saved. |
 | `MAPILLARY_TOKEN` | No | Free client token from the [Mapillary developer dashboard](https://www.mapillary.com/dashboard/developers). Adds Mapillary imagery on top of KartaView, which already works without any key. |
 | `NOMINATIM_USER_AGENT` | **Yes before deploying** | Nominatim's usage policy requires a real identifying contact string, e.g. `compass-globe/0.1 (you@example.com)`. Set it or you risk being blocked. |
+| `COPERNICUS_CLIENT_ID` | No | Free OAuth client from the [Copernicus Data Space dashboard](https://dataspace.copernicus.eu) (User settings → OAuth clients, client_credentials grant). Adds a high-resolution (10 m) Sentinel-2 L2A scene preview to the street-imagery grid. Without both keys the layer is silently skipped. |
+| `COPERNICUS_CLIENT_SECRET` | No | Secret paired with `COPERNICUS_CLIENT_ID`. No credit card; free. |
 
 ### Deployment notes
 
@@ -378,5 +390,9 @@ Two rules: no paid or proprietary vision APIs, and no clue may be added without 
 ## Licence and data attribution
 
 Code: MIT. Geodata: © OpenStreetMap contributors, ODbL. Street imagery: Mapillary, KartaView and
-Panoramax contributors, CC BY-SA. Satellite basemap: Esri World Imagery (Maxar, Earthstar
-Geographics). Terrain: OpenTopoMap, CC BY-SA. Country polygons: Natural Earth, public domain.
+Panoramax contributors, CC BY-SA. Satellite basemaps: NASA GIBS (MODIS Terra & NOAA-20
+VIIRS, daily true-color, NASA open data); EOX Sentinel-2 cloudless (CC BY 4.0, Contains
+modified Copernicus Sentinel data 2016 & 2017); Esri World Imagery (Maxar, Earthstar
+Geographics — non-commercial use only per Esri terms). Optional high-resolution scene
+previews: Copernicus Data Space Ecosystem (Sentinel-2 L2A). Terrain: OpenTopoMap, CC BY-SA.
+Country polygons: Natural Earth, public domain.
