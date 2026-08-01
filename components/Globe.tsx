@@ -42,11 +42,19 @@ const gibsUrl = (layer: string) => (x: number, y: number, l: number) =>
 // rather than the static Esri mosaic — Esri stays available as a labelled,
 // non-commercial-use legacy fallback entry.
 const BASEMAPS = {
-  satellite: {
+  sentinel2: {
     label: "Satellite",
+    max: 21,
+    url: (x: number, y: number, l: number) =>
+      `https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless_3857/default/GoogleMapsCompatible/${l}/${y}/${x}.jpg`,
+    credit:
+      "Sentinel-2 cloudless © EOX IT Services GmbH (CC BY 4.0, Contains modified Copernicus Sentinel data)",
+  },
+  live: {
+    label: "Live sat",
     max: 9,
     url: gibsUrl("MODIS_Terra_CorrectedReflectance_TrueColor"),
-    credit: "Imagery © NASA GIBS (MODIS Terra, daily true-color)",
+    credit: "Imagery © NASA GIBS (MODIS Terra, daily true-color — coarse, weather-scale)",
   },
   street: {
     label: "Street",
@@ -61,20 +69,6 @@ const BASEMAPS = {
     url: (x: number, y: number, l: number) =>
       `https://a.tile.opentopomap.org/${l}/${x}/${y}.png`,
     credit: "Terrain: OpenTopoMap (CC BY-SA), SRTM elevation",
-  },
-  viirs: {
-    label: "VIIRS",
-    max: 9,
-    url: gibsUrl("VIIRS_NOAA20_CorrectedReflectance_TrueColor"),
-    credit: "Imagery © NASA GIBS (NOAA-20 VIIRS, daily true-color)",
-  },
-  sentinel2: {
-    label: "Sentinel-2",
-    max: 21,
-    url: (x: number, y: number, l: number) =>
-      `https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless_3857/default/GoogleMapsCompatible/${l}/${y}/${x}.jpg`,
-    credit:
-      "Sentinel-2 cloudless © EOX IT Services GmbH (CC BY 4.0, Contains modified Copernicus Sentinel data 2016 & 2017)",
   },
   esri: {
     label: "Esri",
@@ -193,8 +187,8 @@ export default function CompassGlobe({
         pointLat={(d: any) => d.lat}
         pointLng={(d: any) => d.lon}
         pointColor={(d: any) => (d.key === selected ? "#FFFFFF" : ACCENT)}
-        pointAltitude={0.004}
-        pointRadius={(d: any) => 0.05 + d.confidence * 0.09}
+        pointAltitude={0.0015}
+        pointRadius={(d: any) => 0.04 + d.confidence * 0.07}
         pointResolution={18}
         onPointClick={(d: any) => onSelect(d.key)}
         pointLabel={(d: any) =>

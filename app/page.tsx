@@ -70,7 +70,7 @@ export default function Page() {
   const [tab, setTab] = useState<Tab>("frames");
   const [showMethod, setShowMethod] = useState(false);
   const [showSetup, setShowSetup] = useState(true);
-  const [basemap, setBasemap] = useState<BasemapKey>("satellite");
+  const [basemap, setBasemap] = useState<BasemapKey>("sentinel2");
   const [zoomToken, setZoomToken] = useState(0);
   const [visionBackendUsed, setVisionBackendUsed] = useState<string | null>(null);
   const [visionModeUsed, setVisionModeUsed] = useState<"clip+siglip" | "clip" | null>(null);
@@ -330,13 +330,13 @@ export default function Page() {
             <CompassGlobe points={points} selected={selectedCandidate} onSelect={setSelectedCandidate} basemap={basemap} zoomToken={zoomToken} />
           </div>
 
-          <div className="absolute left-6 top-6 flex border-2 border-bone-100 bg-ink-950">
+          <div className="absolute left-3 top-3 flex max-w-[calc(100%-24px)] overflow-x-auto border-2 border-bone-100 bg-ink-950 lg:left-6 lg:top-6">
             {BASEMAP_KEYS.map((k, i) => (
               <button
                 key={k}
                 onClick={() => setBasemap(k)}
                 data-testid={`button-basemap-${k}`}
-                className={`px-3 py-1.5 font-display text-xs font-semibold ${i > 0 ? "border-l border-ink-700" : ""} ${
+                className={`shrink-0 px-2.5 py-1.5 font-display text-xs font-semibold lg:px-3 ${i > 0 ? "border-l border-ink-700" : ""} ${
                   basemap === k ? "bg-bone-100 text-ink-950" : "text-bone-400 hover:text-bone-100"
                 }`}
               >
@@ -349,7 +349,7 @@ export default function Page() {
             <button
               onClick={() => setZoomToken((z) => z + 1)}
               data-testid="button-zoom-street"
-              className="absolute right-6 top-6 border-2 border-signal bg-signal px-4 py-2 font-display text-sm font-bold uppercase tracking-wide text-ink-950 hover:bg-bone-100 hover:border-bone-100"
+              className="absolute bottom-3 right-3 z-10 border-2 border-signal bg-signal px-3 py-2 font-display text-xs font-bold uppercase tracking-wide text-ink-950 hover:border-bone-100 hover:bg-bone-100 lg:bottom-auto lg:right-6 lg:top-6 lg:px-4 lg:text-sm"
             >
               Descend to street
             </button>
@@ -362,7 +362,7 @@ export default function Page() {
           )}
 
           {busy && (
-            <div className="absolute inset-x-0 top-0 p-6">
+            <div className="absolute inset-x-0 top-12 p-3 lg:top-0 lg:p-6">
               <div className="max-w-lg border-2 border-bone-100 bg-ink-950 rise">
                 <div className="flex items-baseline justify-between border-b border-ink-700 px-4 py-2">
                   <span className="marker text-signal">{progress.stage || "working"}</span>
@@ -380,7 +380,7 @@ export default function Page() {
           )}
 
           {result && (
-            <div className="absolute inset-x-0 bottom-0 p-6">
+            <div className="absolute inset-x-0 bottom-0 p-3 pr-28 lg:p-6 lg:pr-6">
               <div className="max-w-2xl border-2 border-bone-100 bg-ink-950 rise">
                 <div className="flex items-center justify-between border-b border-ink-700 px-4 py-2">
                   <span className="marker">Candidate ledger</span>

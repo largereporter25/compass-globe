@@ -16,7 +16,13 @@ if (!process.env.DATABASE_URL) {
 }
 
 const sql = neon(process.env.DATABASE_URL);
-const ddl = readFileSync(new URL("./schema.sql", import.meta.url), "utf8");
+const raw = readFileSync(new URL("./schema.sql", import.meta.url), "utf8");
+// Strip line comments BEFORE splitting on ";" — a semicolon inside a comment
+// would otherwise shear the file mid-sentence and feed garbage to Postgres.
+const ddl = raw
+  .split("\n")
+  .filter((line) => !line.trim().startsWith("--"))
+  .join("\n");
 
 for (const stmt of ddl.split(";").map((s) => s.trim()).filter(Boolean)) {
   await sql(stmt);

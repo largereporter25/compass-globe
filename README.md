@@ -10,9 +10,11 @@ No Google Vision. No Bing. No paid reverse-image API. No API key required to run
 
 **Live:** https://compass-globe.vercel.app
 
-<!-- screenshots -->
-<!-- ![Analysis view](docs/screenshot-analysis.png) -->
-<!-- ![Reasoning trail](docs/screenshot-reasoning.png) -->
+![Compass Globe — street-level descent over Ahmedabad on Sentinel-2 imagery](docs/hero.png)
+
+*A 12-second clip of Ahmedabad signage, analysed and descended to street level on
+Sentinel-2 cloudless imagery. The candidate ledger, reasoning trail and country
+anchor are all visible in one screen.*
 
 ---
 
