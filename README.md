@@ -132,6 +132,32 @@ and no non-Latin script anywhere — now produces three lexicon hits, anchors to
 India at 100%, and resolves Karol Bagh in Central Delhi. Before this, none of
 those words carried any signal at all.
 
+### The globe is a real map
+
+Not a stylised sphere. The globe streams live slippy tiles and descends to
+street level, so a candidate can be inspected against actual imagery rather
+than a dot on a diagram:
+
+| Layer | Source | Licence |
+| --- | --- | --- |
+| Satellite | Esri World Imagery (Maxar, Earthstar Geographics) | Free with attribution, no key |
+| Street | OpenStreetMap standard tiles | ODbL |
+| Terrain | OpenTopoMap with SRTM elevation | CC BY-SA |
+
+Selecting a candidate flies the camera to district altitude; **Descend to
+street** drops it to roughly a kilometre up, close enough to read a road layout
+and match it against a keyframe. Each candidate also carries direct links into
+OpenStreetMap, the OSM trace view, and Bhuvan for Indian coordinates.
+
+### WebGPU
+
+The CLIP pass runs on WebGPU where the browser exposes it and falls back to
+WASM everywhere else, silently and automatically. The active backend is shown
+on the vision toggle. transformers.js is loaded as a native ES module from a
+CDN rather than bundled — its ONNX runtime uses `import.meta` in a way Next's
+minifier rejects, and keeping the inference runtime out of the main bundle
+means the app still loads instantly for anyone who leaves the vision pass off.
+
 ### Country anchoring — why this exists
 
 OpenStreetMap is not evenly mapped. Western Europe has vastly more named
@@ -215,7 +241,7 @@ correct. Bands are `Weak` / `Moderate` / `Strong`.
 | Vision | CLIP ViT-B/32 via `@xenova/transformers`, in-browser | Landmark and streetscape recognition without a paid vision API |
 | Street imagery | KartaView + Panoramax (keyless) + Mapillary (optional token) | CC BY-SA, complementary Global South coverage, works with zero configuration |
 | India terrain | Bhuvan (ISRO) deep link | Authoritative Indian satellite and land-use data, opened for manual cross-check |
-| Globe | `react-globe.gl` / three.js | Hex-polygon countries, confidence-scaled points |
+| Globe | `react-globe.gl` / three.js slippy-tile engine | Real satellite, street and terrain tiles, zoomable to street level |
 | Database | Neon Postgres over HTTP | Serverless-friendly; app degrades gracefully without it |
 
 ```
@@ -322,6 +348,8 @@ The UI states all of this in the "Method and limits" panel. Please leave it ther
 - [x] Bhuvan (ISRO) deep link for India-specific terrain cross-checking
 - [x] Saved investigation browser and shareable case links
 - [x] Scene-change threshold exposed in the UI, plus a keyframe-quality score
+- [x] Real satellite, street and terrain basemaps with street-level descent
+- [x] WebGPU inference path with automatic WASM fallback
 - [ ] Bhuvan WMS layers rendered in-app rather than linked out
 - [x] Place-word lexicon for Latin-script non-English signage
 - [x] Registration-plate formats beyond India and the UK
@@ -349,5 +377,6 @@ Two rules: no paid or proprietary vision APIs, and no clue may be added without 
 
 ## Licence and data attribution
 
-Code: MIT. Geodata: © OpenStreetMap contributors, ODbL. Street imagery: Mapillary and KartaView
-contributors, CC BY-SA. Country polygons: Natural Earth, public domain.
+Code: MIT. Geodata: © OpenStreetMap contributors, ODbL. Street imagery: Mapillary, KartaView and
+Panoramax contributors, CC BY-SA. Satellite basemap: Esri World Imagery (Maxar, Earthstar
+Geographics). Terrain: OpenTopoMap, CC BY-SA. Country polygons: Natural Earth, public domain.
