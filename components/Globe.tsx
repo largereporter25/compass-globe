@@ -68,6 +68,14 @@ const BASEMAPS = {
     url: gibsUrl("VIIRS_NOAA20_CorrectedReflectance_TrueColor"),
     credit: "Imagery © NASA GIBS (NOAA-20 VIIRS, daily true-color)",
   },
+  sentinel2: {
+    label: "Sentinel-2",
+    max: 21,
+    url: (x: number, y: number, l: number) =>
+      `https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless_3857/default/GoogleMapsCompatible/${l}/${y}/${x}.jpg`,
+    credit:
+      "Sentinel-2 cloudless © EOX IT Services GmbH (CC BY 4.0, Contains modified Copernicus Sentinel data 2016 & 2017)",
+  },
   esri: {
     label: "Esri",
     max: 19,
