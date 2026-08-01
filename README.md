@@ -8,6 +8,8 @@ candidate regions land on a globe with the exact reasoning attached to each one.
 
 No Google Vision. No Bing. No paid reverse-image API. No API key required to run it.
 
+**Live:** https://compass-globe.vercel.app
+
 <!-- screenshots -->
 <!-- ![Analysis view](docs/screenshot-analysis.png) -->
 <!-- ![Reasoning trail](docs/screenshot-reasoning.png) -->
