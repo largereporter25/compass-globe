@@ -1,0 +1,190 @@
+# Compass Globe
+
+**Geolocation triage for video evidence. Open geodata only. Your video never leaves your browser.**
+
+Drop a clip. ffmpeg cuts keyframes and Tesseract reads them — both inside your browser tab. On-screen
+text is turned into auditable location clues, place names are resolved against OpenStreetMap, and
+candidate regions land on a globe with the exact reasoning attached to each one.
+
+No Google Vision. No Bing. No paid reverse-image API. No API key required to run it.
+
+<!-- screenshots -->
+<!-- ![Analysis view](docs/screenshot-analysis.png) -->
+<!-- ![Reasoning trail](docs/screenshot-reasoning.png) -->
+
+---
+
+## Why this exists
+
+Fact-checkers still geolocate video with InVID and Google Lens. Both work by fanning keyframes out to
+Google, Bing, Yandex and TinEye. That has three costs a newsroom actually feels: it is rate-limited,
+it is expensive at volume, and every query tells a Big Tech search index exactly what your newsroom
+is investigating right now.
+
+Compass Globe does not try to replicate web-scale reverse image search — nobody outside Google can,
+and pretending otherwise is how these projects die. It solves the adjacent problem instead: **turning
+what is legibly written inside the frame into a defensible shortlist of places to check.** Script,
+signage, registration plates, dialling codes, domains, currency marks. The things a human OSINT
+investigator reads off a frame first, done systematically across every keyframe, with the reasoning
+kept intact.
+
+The pretrained geolocation models everyone reaches for do not cover the Global South well —
+StreetCLIP's own model card states its training data excludes India and China entirely. A text-first
+pipeline plus OpenStreetMap and Mapillary does not inherit that gap, because the evidence comes out
+of the frame rather than out of a Western-skewed training set.
+
+---
+
+## How the pipeline works
+
+```
+video file (never uploaded)
+   │
+   ├─ 1. ffmpeg.wasm ─────── keyframes, by scene-change score or even interval
+   │
+   ├─ 2. Tesseract.js ────── OCR per frame, in whichever scripts you select
+   │
+   ├─ 3. clue extraction ─── deterministic matchers, no model inference:
+   │        • Unicode script blocks       → country priors
+   │        • Indian / UK plate formats   → state or country
+   │        • +CC dialling prefixes       → country
+   │        • ccTLDs on signage           → country
+   │        • currency signs              → country
+   │        • capitalised tokens          → possible place names
+   │
+   ├─ 4. OpenStreetMap Nominatim ─ resolves place names to real coordinates
+   │
+   ├─ 5. weighted aggregation ──── ranked candidates + confidence band
+   │
+   └─ 6. globe + reasoning trail ─ every candidate shows the clues that produced it
+```
+
+Steps 1–2 run in the browser. Steps 3–5 run in a Next.js route handler. Only extracted text and small
+JPEG thumbnails cross the network — never the video.
+
+### Confidence, honestly
+
+`confidence` is **a candidate's share of the total recovered evidence weight**, damped by how many
+independent clues support it and hard-capped at 0.92. It is not a probability that the location is
+correct. Bands are `Weak` / `Moderate` / `Strong`.
+
+---
+
+## Architecture
+
+| Layer | Choice | Why |
+| --- | --- | --- |
+| Framework | Next.js 14 App Router | One deployable unit, API routes included |
+| Video | `@ffmpeg/ffmpeg` (WASM), vendored in `public/ffmpeg` | Vercel serverless cannot run ffmpeg on video; the browser can, and the file stays local |
+| OCR | `tesseract.js` | Runs client-side, ~20 scripts, no key |
+| Clue engine | Plain TypeScript in `lib/clues.ts` | Deterministic and auditable beats opaque and slightly better |
+| Gazetteer | OpenStreetMap Nominatim | Free, keyless, ODbL |
+| Street imagery | Mapillary (optional) | CC BY-SA, real Global South coverage |
+| Globe | `react-globe.gl` / three.js | Hex-polygon countries, confidence-scaled points |
+| Database | Neon Postgres over HTTP | Serverless-friendly; app degrades gracefully without it |
+
+```
+app/
+  page.tsx                  the whole UI
+  api/analyze/route.ts      clues → geodata → candidates → persistence
+  api/investigations/       saved investigation list and detail
+lib/
+  pipeline.ts               browser-side ffmpeg + Tesseract + frame stats
+  clues.ts                  deterministic clue matchers
+  regions.ts                centroids, plate prefixes, dialling codes, script priors
+  geo.ts                    Nominatim + Mapillary clients
+  infer.ts                  evidence weighting and ranking
+  db.ts                     Neon client + schema
+components/Globe.tsx        three.js globe
+scripts/init-db.mjs         one-shot schema bootstrap
+scripts/make-test-clip.py   generates a synthetic signage clip for testing
+public/ffmpeg/              vendored ffmpeg-core (~32 MB) — no CDN at runtime
+public/data/                Natural Earth country polygons
+```
+
+---
+
+## Run it locally
+
+```bash
+git clone <your-repo-url> compass-globe
+cd compass-globe
+npm install
+cp .env.example .env.local     # optional — the app runs without any of it
+npm run dev                    # http://localhost:3000
+```
+
+Generate a test clip with legible signage in English, Hindi and Gujarati:
+
+```bash
+python3 scripts/make-test-clip.py     # writes ./test-clip.mp4
+```
+
+## Deploy to Vercel + Neon
+
+1. **Neon** — create a project at [neon.tech](https://neon.tech), copy the pooled connection string.
+2. **Schema** — put the string in `.env.local` and run `npm run db:init`.
+3. **Vercel** — import the GitHub repo. Framework preset: Next.js. No build overrides needed.
+4. **Environment variables** — add the three below in Vercel's project settings.
+5. Deploy.
+
+### Environment variables
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `DATABASE_URL` | No | Neon Postgres pooled connection string. Without it, analysis still runs and the header says `Neon not configured`; nothing is saved. |
+| `MAPILLARY_TOKEN` | No | Free client token from the [Mapillary developer dashboard](https://www.mapillary.com/dashboard/developers). Enables street-level imagery next to the leading candidate. |
+| `NOMINATIM_USER_AGENT` | **Yes before deploying** | Nominatim's usage policy requires a real identifying contact string, e.g. `compass-globe/0.1 (you@example.com)`. Set it or you risk being blocked. |
+
+### Deployment notes
+
+- `/api/analyze` makes up to six sequential Nominatim lookups at ~1 request/second, so the route can
+  run for 6–8 seconds. It declares `maxDuration = 60`. On Vercel Hobby without Fluid compute the
+  ceiling is lower — reduce `MAX_GEOCODES` in `lib/infer.ts` if you hit a timeout.
+- `public/ffmpeg/ffmpeg-core.wasm` is ~32 MB and is committed on purpose, so the app has no runtime
+  CDN dependency. It is downloaded once per browser and then cached.
+- Thumbnails are stored as data URLs in Postgres. Fine at this scale; swap to object storage if you
+  start archiving thousands of investigations.
+
+---
+
+## Limitations — read these before you publish anything
+
+- **Geolocation here is probabilistic.** Every result is a hypothesis to check, not a determination.
+- **No legible text means no result.** Silence from the tool is not evidence about the footage.
+- **OCR is noisy.** A misread plate prefix points confidently at the wrong state.
+- **Signage travels.** A language on a shop front does not fix a country.
+- **Confidence is a share of recovered evidence weight,** not a probability of being correct.
+- **Region markers sit on centroids.** They mark a hypothesis area, never a camera position.
+- **The gazetteer produces false positives.** Generic words get filtered, but not perfectly.
+- **Green-pixel share and luma are observations only.** They are displayed, never scored.
+
+The UI states all of this in the "Method and limits" panel. Please leave it there in any fork.
+
+---
+
+## Roadmap
+
+- [ ] Scene-change threshold exposed in the UI, with a keyframe-quality score
+- [ ] Sun-angle / shadow time estimation from a candidate coordinate (pure astronomy, no API)
+- [ ] KartaView and Panoramax alongside Mapillary
+- [ ] Bhuvan (ISRO) layers for India-specific terrain and land-use cross-checking
+- [ ] Local GeoCLIP / StreetCLIP inference as a second, clearly-separated opinion
+- [ ] Saved investigation browser and shareable case links
+- [ ] PDF evidence export alongside the JSON bundle
+- [ ] Community-contributed regional signage patterns beyond India and the UK
+
+## Contributing
+
+The clue engine is the part worth extending, and it needs no machine learning knowledge — just local
+expertise. Registration-plate formats, script priors, dialling codes and gazetteer stopwords all live
+in `lib/regions.ts` and `lib/clues.ts` as plain data. If you know how plates or signage work in your
+country, that is a directly useful pull request.
+
+Two rules: no paid or proprietary vision APIs, and no clue may be added without a human-readable
+`rationale` string explaining it.
+
+## Licence and data attribution
+
+Code: MIT. Geodata: © OpenStreetMap contributors, ODbL. Street imagery: Mapillary contributors,
+CC BY-SA. Country polygons: Natural Earth, public domain.
