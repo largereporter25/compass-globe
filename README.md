@@ -193,6 +193,12 @@ London feature before "Delhi" was ever queried.
 
 Three things fix that, and they are the difference between a toy and a tool:
 
+0. **Hard and soft evidence are counted on separate ballots.** Hard evidence is
+   read literally off the frame: a plate prefix, a dialling code, a ccTLD, a
+   writing system, a place-word. Soft evidence is the vision model's impression
+   of a streetscape, or a name the gazetteer resolved. They are never pooled,
+   and only hard evidence may restrict a gazetteer lookup. This matters more
+   than it sounds — see the note below.
 1. **Anchor the country from bias-free evidence first.** Writing system, plate
    prefix, dialling code, ccTLD and currency sign carry no gazetteer skew. If
    they agree on a country by a clear majority, that becomes the anchor.
@@ -201,6 +207,30 @@ Three things fix that, and they are the difference between a toy and a tool:
 3. **Demote, don't delete, conflicts.** A candidate outside the anchor keeps its
    place in the ledger flagged `conflicts` and scaled to 18% weight, because the
    anchor can be wrong and hiding the alternative would be dishonest.
+
+#### Two ways this went wrong before
+
+**A lone CLIP guess used to teleport results to Germany.** The anchor had a
+relative threshold but no absolute floor, so a single weak "a European street
+with a tram" match — with no other country in the race — reached 100% relative
+strength, anchored the investigation to Germany, and restricted every
+subsequent gazetteer lookup there. Footage from Jantar Mantar landed in
+Germany. Fixed with separate ballots, an absolute floor on each, and a rule
+that soft evidence never restricts the gazetteer.
+
+**The gazetteer used to anchor itself.** Resolved place names were counted as
+hard evidence, which made the anchor self-reinforcing: the first bad geocode
+won and then constrained everything after it. "Jantar" alone resolves to a
+village in Poland, and that was enough to anchor an investigation of Jantar
+Mantar to Poland. Resolved names now vote soft only.
+
+Two smaller fixes fell out of the same investigation. The Türkiye plate matcher
+was firing on the tail of every Indian plate — "GJ 01 KA 4321" contains
+"01 KA 4321" — and the German matcher accepted almost any
+letters-space-letters-digits sequence, so OCR noise produced phantom German
+plates. Both are now properly anchored patterns. And OpenStreetMap files
+monuments under `historic` and `tourism`, which the class filter was
+discarding, so "Jantar Mantar" was thrown away while "Jantar" survived.
 
 Alongside that, the place-name extractor now discards a phrase once half or more
 of its words are generic civic vocabulary — "Commissioner Office", "Traffic

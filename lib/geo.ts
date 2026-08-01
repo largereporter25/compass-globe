@@ -51,7 +51,13 @@ export async function geocode(name: string, preferCountry?: string | null): Prom
     const usable = rows.filter((r) => {
       // jsonv2 returns the feature class under `category`; older formats use `class`.
       const cls = (r.category || r.class) as string;
-      return ["place", "boundary", "highway", "natural", "landuse", "waterway"].includes(cls);
+      // "historic" and "tourism" matter more than they look: OpenStreetMap
+      // files monuments, forts, observatories and memorials under them, so
+      // excluding them threw away exactly the landmarks an investigator is
+      // most likely to read off a signboard. Jantar Mantar itself is
+      // historic=monument, and used to be discarded while "Jantar" survived
+      // as a village in Poland.
+      return ["place", "boundary", "highway", "natural", "landuse", "waterway", "historic", "tourism"].includes(cls);
     });
     if (!usable.length) return null;
 
@@ -59,7 +65,10 @@ export async function geocode(name: string, preferCountry?: string | null): Prom
     const rank = (r: any) => {
       const type = String(r.addresstype || r.type || "");
       const settlement = ["city", "town", "state", "country", "county", "district", "suburb", "village", "municipality"].includes(type);
-      return (settlement ? 1 : 0) * 2 + (typeof r.importance === "number" ? r.importance : 0.3);
+      const landmark = ["monument", "memorial", "attraction", "archaeological_site", "fort", "castle", "ruins", "museum"].includes(type);
+      // A named monument is at least as specific as a settlement, and far more
+      // specific than a same-named hamlet on the other side of the world.
+      return (settlement ? 2 : landmark ? 2.2 : 0) + (typeof r.importance === "number" ? r.importance : 0.3);
     };
     const r = usable.sort((a, b) => rank(b) - rank(a))[0];
 

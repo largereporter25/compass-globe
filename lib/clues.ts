@@ -19,7 +19,9 @@ export type Clue = {
   countryCode?: string;
 };
 
-const PLATE_IN = /\b([A-Z]{2})[\s-]?(\d{1,2})[\s-]?([A-Z]{1,3})[\s-]?(\d{3,4})\b/g;
+// Covers both the classic "GJ 01 KA 4321" and the modern two-letter series
+// "DL 8C AF 4021", which the earlier pattern silently missed.
+const PLATE_IN = /\b([A-Z]{2})[\s-]?(\d{1,2}[A-Z]?)[\s-]?([A-Z]{1,3})[\s-]?(\d{3,4})\b/g;
 const PLATE_GB = /\b([A-Z]{2}\d{2})\s?([A-Z]{3})\b/g;
 const PHONE = /(?:^|[^\d])\+(\d{1,3})[\s-]?(\d[\d\s-]{6,13}\d)/g;
 const DOMAIN = /\b(?:[a-z0-9-]+\.)+([a-z]{2,4})\b/gi;
@@ -214,9 +216,13 @@ export function extractClues(frameIndex: number, rawText: string): Clue[] {
         rationale: "Possible place name read from signage. Checked against the OpenStreetMap gazetteer.",
         candidates: [],
         needsGeocode: true,
-        // Single distinctive proper nouns resolve far more reliably than long
-        // strings of signage text, so they are queried first.
-        priority: (parts.length === 1 ? 2 : 0) + (name === name.toUpperCase() ? 0.5 : 0),
+        // A two-word proper noun is the most specific thing a signboard
+        // usually offers, so it is spent first: "Jantar Mantar" is a monument
+        // in Delhi, while "Jantar" on its own is a village in Poland. Single
+        // words come next, and longer strings last.
+        priority:
+          (parts.length === 2 ? 3 : parts.length === 1 ? 2 : 0) +
+          (name === name.toUpperCase() ? 0.5 : 0),
       });
     }
   }

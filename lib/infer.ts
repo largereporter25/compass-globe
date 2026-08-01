@@ -43,7 +43,7 @@ export type InferenceResult = {
   summary: string;
   geocodeAttempts: number;
   geocodeHits: number;
-  anchorCountry: { code: string; label: string; strength: number } | null;
+  anchorCountry: { code: string; label: string; strength: number; basis: "hard" | "soft" } | null;
 };
 
 // Nominatim is a donated community service rate-limited to about one request
@@ -109,7 +109,22 @@ export async function infer(rawClues: Clue[]): Promise<InferenceResult> {
   // ── Pass 0: landmarks recognised by CLIP. These are the only clues that
   // point at a coordinate rather than a region, so they get their own bucket
   // and a weight that reflects how confident the match was.
-  const countryVotes = new Map<string, number>();
+  // Two ballots. HARD evidence is read literally off the frame — a plate
+  // prefix, a dialling code, a ccTLD, a writing system, a place-word. SOFT
+  // evidence is the vision model's impression of a streetscape, which is a
+  // similarity score against a hand-written sentence and nothing more.
+  //
+  // They must never be pooled. A single weak "a European street with a tram"
+  // guess, with no other country in the race, used to reach 100% relative
+  // strength and anchor the whole investigation to Germany — after which
+  // gazetteer lookups were restricted to Germany and every result followed it
+  // there. Relative dominance is not enough; soft evidence needs an absolute
+  // floor and is never allowed to restrict the gazetteer on its own.
+  const hardVotes = new Map<string, number>();
+  const softVotes = new Map<string, number>();
+  const countryVotes = hardVotes;
+  const SOFT_KINDS = new Set(["scene", "environment"]);
+
   for (const clue of clues) {
     if (clue.kind !== "landmark" || clue.lat == null || clue.lon == null) continue;
     // A landmark seen in several keyframes is far more trustworthy than a
@@ -141,18 +156,35 @@ export async function infer(rawClues: Clue[]): Promise<InferenceResult> {
         region.admin ? "sub-national" : "country", cand.w, clue
       );
       const cc = countryOf(region.key);
-      if (cc) countryVotes.set(cc, (countryVotes.get(cc) ?? 0) + cand.w);
+      if (cc) {
+        const ballot = SOFT_KINDS.has(clue.kind) ? softVotes : hardVotes;
+        ballot.set(cc, (ballot.get(cc) ?? 0) + cand.w);
+      }
     }
   }
 
-  const anchorFrom = (): { code: string; strength: number } | null => {
-    if (!countryVotes.size) return null;
-    const sorted = [...countryVotes.entries()].sort((a, b) => b[1] - a[1]);
+  // An anchor needs a clear leader AND enough evidence behind it to be worth
+  // trusting. Absolute floors matter more than shares here: a lone clue always
+  // has a 100% share of a one-clue election.
+  const HARD_FLOOR = 0.3;  // roughly one solid plate, ccTLD or place-word
+  const SOFT_FLOOR = 0.9;  // several corroborating streetscape reads
+
+  const winner = (ballot: Map<string, number>, floor: number) => {
+    if (!ballot.size) return null;
+    const sorted = [...ballot.entries()].sort((a, b) => b[1] - a[1]);
     const total = sorted.reduce((s, [, v]) => s + v, 0);
     const [code, top] = sorted[0];
+    if (top < floor) return null;
     const strength = top / total;
-    // Require a clear leader. A two-way tie is not an anchor, it is ambiguity.
     return strength >= 0.5 ? { code, strength } : null;
+  };
+
+  const anchorFrom = (): { code: string; strength: number; basis: "hard" | "soft" } | null => {
+    const hard = winner(hardVotes, HARD_FLOOR);
+    if (hard) return { ...hard, basis: "hard" };
+    const soft = winner(softVotes, SOFT_FLOOR);
+    if (soft) return { ...soft, basis: "soft" };
+    return null;
   };
 
   let anchor = anchorFrom();
@@ -173,7 +205,7 @@ export async function infer(rawClues: Clue[]): Promise<InferenceResult> {
 
   for (const clue of toponyms) {
     geocodeAttempts++;
-    const hit = await geocode(clue.value, anchor?.code ?? null);
+    const hit = await geocode(clue.value, anchor?.basis === "hard" ? anchor.code : null);
     if (!hit) continue;
     geocodeHits++;
 
@@ -198,7 +230,13 @@ export async function infer(rawClues: Clue[]): Promise<InferenceResult> {
     );
 
     if (hit.countryCode) {
-      countryVotes.set(hit.countryCode, (countryVotes.get(hit.countryCode) ?? 0) + weight);
+      // A resolved place name votes SOFT, never hard. It came out of the
+      // gazetteer, which is the very source the anchor exists to correct for.
+      // Counting it as hard evidence makes the anchor self-reinforcing: the
+      // first bad geocode wins and then restricts every lookup after it.
+      // "Jantar" alone resolves to a village in Poland, and that used to be
+      // enough to anchor an investigation of Jantar Mantar to Poland.
+      softVotes.set(hit.countryCode, (softVotes.get(hit.countryCode) ?? 0) + weight);
       const region = resolveRegion(hit.countryCode);
       if (region) {
         add(region.key, region.lat, region.lon, region.label, region.country,
@@ -221,7 +259,8 @@ export async function infer(rawClues: Clue[]): Promise<InferenceResult> {
       c.coherence = "agrees";
     } else {
       c.coherence = "conflicts";
-      c.score *= CONFLICT_PENALTY;
+      // A soft anchor is an impression, not a finding, so it barely penalises.
+      c.score *= anchor.basis === "hard" ? CONFLICT_PENALTY : 0.6;
     }
   }
 
@@ -275,7 +314,12 @@ export async function infer(rawClues: Clue[]): Promise<InferenceResult> {
 
   const anchorRegion = anchor ? resolveRegion(anchor.code) : null;
   const anchorOut = anchor
-    ? { code: anchor.code, label: anchorRegion?.label ?? anchor.code, strength: Number(anchor.strength.toFixed(2)) }
+    ? {
+        code: anchor.code,
+        label: anchorRegion?.label ?? anchor.code,
+        strength: Number(anchor.strength.toFixed(2)),
+        basis: anchor.basis,
+      }
     : null;
 
   return {
@@ -300,7 +344,7 @@ function buildSummary(
   top: Candidate[],
   clueCount: number,
   hits: number,
-  anchor: { code: string; label: string; strength: number } | null
+  anchor: { code: string; label: string; strength: number; basis: "hard" | "soft" } | null
 ): string {
   if (!top.length) {
     return "No location-bearing text was recovered from the keyframes. OCR found nothing that maps to a script, plate format, dialling code, domain, currency or gazetteer entry. This is not evidence that the footage is unplaceable — it means this text-first pipeline had nothing to work with, and the frames need a human eye or a non-textual method.";
@@ -312,7 +356,9 @@ function buildSummary(
   );
   if (anchor) {
     parts.push(
-      `The non-place evidence anchors this to ${anchor.label} (${(anchor.strength * 100).toFixed(0)}% of that evidence), so gazetteer lookups were restricted there and any candidate outside it was demoted.`
+      anchor.basis === "hard"
+        ? `Text read directly off the frames — plates, dialling codes, domains, scripts, place-words — anchors this to ${anchor.label} (${(anchor.strength * 100).toFixed(0)}% of that evidence), so gazetteer lookups were restricted there and any candidate outside it was demoted.`
+        : `There is no hard textual evidence of a country here. The vision model's read of the streetscape leans towards ${anchor.label}, which is a weak signal only: the gazetteer was left unrestricted and competing countries are barely penalised.`
     );
   }
   parts.push(

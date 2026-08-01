@@ -107,7 +107,7 @@ export const PLATE_FORMATS: {
   },
   {
     name: "Mercosur",
-    re: /\b[A-Z]{3}[\s-]?\d[A-Z]\d{2}\b/g,
+    re: /(?:^|[^A-Z0-9])[A-Z]{3}[\s-]?\d[A-Z]\d{2}(?![A-Z0-9])/g,
     note: "Matches the Mercosur plate layout used across Brazil and Argentina",
     candidates: [{ key: "BR", w: 0.3 }, { key: "AR", w: 0.16 }],
   },
@@ -119,13 +119,20 @@ export const PLATE_FORMATS: {
   },
   {
     name: "Germany",
-    re: /\b[A-Z]{1,3}[\s-][A-Z]{1,2}[\s-]?\d{1,4}\b(?=\s|$)/g,
+    // Deliberately narrow. The old pattern accepted almost any
+    // letters-space-letters-digits sequence, so OCR noise on non-German
+    // footage produced phantom German plates. A real German plate needs a
+    // separating dash or a wide gap, and at least two digits.
+    re: /(?:^|[^A-Z0-9])([A-Z]{1,3})[\s-]([A-Z]{2})[\s-](\d{2,4})(?![A-Z0-9])/g,
     note: "Matches the German district-letter plate layout",
     candidates: [{ key: "DE", w: 0.22 }],
   },
   {
     name: "Türkiye",
-    re: /\b(0[1-9]|[1-7]\d|8[01])[\s-][A-Z]{1,3}[\s-]?\d{2,4}\b/g,
+    // The province code must genuinely start the plate. Without the leading
+    // guard this also matched the tail of every Indian plate — "GJ 01 KA 4321"
+    // contains "01 KA 4321" — and quietly voted Türkiye on Indian footage.
+    re: /(?:^|[^A-Z0-9])(0[1-9]|[1-7]\d|8[01])[\s-][A-Z]{1,3}[\s-]?\d{2,4}(?![A-Z0-9])/g,
     note: "Matches a Turkish plate, which opens with a two-digit province code",
     candidates: [{ key: "TR", w: 0.4 }],
   },
