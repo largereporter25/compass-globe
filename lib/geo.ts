@@ -69,22 +69,37 @@ export type StreetImage = {
 // Mapillary is the only meaningful open street-level imagery corpus with real
 // coverage across South Asia, Africa and Latin America — the exact regions the
 // major pretrained geolocation models under-represent.
-export async function mapillaryNear(lat: number, lon: number, radiusDeg = 0.05): Promise<StreetImage[]> {
+export async function mapillaryNear(lat: number, lon: number): Promise<StreetImage[]> {
   const token = process.env.MAPILLARY_TOKEN;
   if (!token) return [];
-  const bbox = [lon - radiusDeg, lat - radiusDeg, lon + radiusDeg, lat + radiusDeg].join(",");
+
+  // Mapillary rejects a bounding box that covers too many images with a 500
+  // "reduce the amount of data" error rather than truncating, so start small
+  // and only widen when a box comes back empty.
+  for (const radiusDeg of [0.004, 0.008, 0.015]) {
+    const hits = await mapillaryBox(token, lat, lon, radiusDeg);
+    if (hits.length) return hits;
+  }
+  return [];
+}
+
+async function mapillaryBox(token: string, lat: number, lon: number, radiusDeg: number): Promise<StreetImage[]> {
+  const bbox = [lon - radiusDeg, lat - radiusDeg, lon + radiusDeg, lat + radiusDeg]
+    .map((v) => v.toFixed(6))
+    .join(",");
   const url =
     "https://graph.mapillary.com/images?" +
     new URLSearchParams({
       access_token: token,
       fields: "id,thumb_1024_url,geometry,captured_at",
       bbox,
-      limit: "6",
+      limit: "4",
     });
   try {
     const res = await fetch(url);
     if (!res.ok) return [];
     const json = (await res.json()) as any;
+    if (!Array.isArray(json?.data)) return [];
     return (json.data || [])
       .filter((d: any) => d.thumb_1024_url && d.geometry?.coordinates)
       .map((d: any) => ({
