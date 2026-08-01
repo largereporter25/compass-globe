@@ -553,7 +553,7 @@ export default function Page() {
                 }`}
               >
                 <span>
-                  <span className="block font-display text-sm font-semibold text-bone-100">Vision pass (CLIP)</span>
+                  <span className="block font-display text-sm font-semibold text-bone-100">Vision pass (CLIP + SigLIP)</span>
                   <span className="mt-0.5 block text-xs text-bone-600">
                     Recognises landmarks and streetscape signatures when there is no legible text
                   </span>

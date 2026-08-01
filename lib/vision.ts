@@ -238,12 +238,31 @@ export async function loadVision(onProgress: (p: Progress) => void) {
 async function scoreFrame(ctx: NonNullable<typeof cached>, blob: Blob, frameIndex: number): Promise<VisualClue[]> {
   const { RawImage } = await loadLib();
   const image = await RawImage.fromBlob(blob);
-  const inputs = await ctx.clip.processor(image);
-  const { image_embeds } = await ctx.clip.visionModel(inputs);
-  const imageEmbedding = l2normalize(Array.from(image_embeds.data as Float32Array));
 
-  const sims = ctx.clip.bank.textEmbeddings.map((t) => dot(imageEmbedding, t));
-  const probs = softmax(sims);
+  // Each model scores the frame against the same prompt bank independently,
+  // then the two probability distributions are averaged. Averaging — rather
+  // than picking a winner — is the point: CLIP and SigLIP were trained on
+  // different data with different losses, so their confident errors do not
+  // line up, and the ensemble is conservative on purpose. A frame only reaches
+  // the high landmark bar when *both* models lean the same way.
+  const probsFor = async (model: ModelCtx) => {
+    const inputs = await model.processor(image);
+    const out = await model.visionModel(inputs);
+    const emb = l2normalize(Array.from((out?.image_embeds ?? out?.pooler_output).data as Float32Array));
+    return softmax(model.bank.textEmbeddings.map((t) => dot(emb, t)));
+  };
+
+  const clipProbs = await probsFor(ctx.clip);
+  let probs: number[];
+  let modelTag: string;
+  if (ctx.siglip) {
+    const siglipProbs = await probsFor(ctx.siglip);
+    probs = clipProbs.map((p, i) => (p + siglipProbs[i]) / 2);
+    modelTag = "CLIP + SigLIP ensemble";
+  } else {
+    probs = clipProbs;
+    modelTag = "CLIP (SigLIP unavailable)";
+  }
 
   const nLandmarks = LANDMARKS.length;
   const nScenes = SCENE_PRIORS.length;
@@ -285,8 +304,8 @@ async function scoreFrame(ctx: NonNullable<typeof cached>, blob: Blob, frameInde
       frame: frameIndex,
       value: lm.label,
       rationale: ambiguousWith
-        ? `CLIP scored this frame ${(probs[i] * 100).toFixed(0)}% against "${lm.prompt}", too close to "${ambiguousWith}" to separate them. Both are kept at reduced weight because they agree on the country. Visual match only.`
-        : `CLIP matched this frame to "${lm.prompt}" at ${(probs[i] * 100).toFixed(0)}% of the bank's total score, ${(probs[i] / Math.max(runnerUp, 1e-6)).toFixed(1)}x clear of the next landmark. Visual match only — confirm against a reference photograph before relying on it.`,
+        ? `${modelTag} scored this frame ${(probs[i] * 100).toFixed(0)}% against "${lm.prompt}", too close to "${ambiguousWith}" to separate them. Both are kept at reduced weight because they agree on the country. Visual match only.`
+        : `${modelTag} matched this frame to "${lm.prompt}" at ${(probs[i] * 100).toFixed(0)}% of the bank's total score, ${(probs[i] / Math.max(runnerUp, 1e-6)).toFixed(1)}x clear of the next landmark. Visual match only — confirm against a reference photograph before relying on it.`,
       score: Number((probs[i] * factor).toFixed(4)),
       candidates: [{ key: lm.countryCode, w: 0.5 * factor }],
       lat: lm.lat,
@@ -314,8 +333,8 @@ async function scoreFrame(ctx: NonNullable<typeof cached>, blob: Blob, frameInde
       frame: frameIndex,
       value: s.note,
       rationale: isEnvironment
-        ? `CLIP scored this frame ${(p * 100).toFixed(0)}% against "${s.prompt}". Recorded as an observation only — environment is never used to score a location.`
-        : `CLIP scored this frame ${(p * 100).toFixed(0)}% against "${s.prompt}". Streetscape signatures are suggestive, not conclusive.`,
+        ? `${modelTag} scored this frame ${(p * 100).toFixed(0)}% against "${s.prompt}". Recorded as an observation only — environment is never used to score a location.`
+        : `${modelTag} scored this frame ${(p * 100).toFixed(0)}% against "${s.prompt}". Streetscape signatures are suggestive, not conclusive.`,
       score: Number(p.toFixed(4)),
       // Scale the prior by how strongly the frame actually matched.
       candidates: s.candidates.map((c) => ({ key: c.key, w: Number((c.w * Math.min(p / 0.25, 1)).toFixed(4)) })),
