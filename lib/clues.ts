@@ -3,9 +3,10 @@
 // substring that triggered it so an investigator can audit the reasoning.
 
 import { CALLING_CODES, CCTLDS, CURRENCY_SIGNS, IN_STATES, SCRIPT_PRIORS } from "./regions";
+import { PLACE_LEXICON, PLATE_FORMATS } from "./lexicon";
 
 export type Clue = {
-  kind: "script" | "plate" | "phone" | "domain" | "currency" | "toponym" | "landmark" | "scene" | "environment";
+  kind: "script" | "plate" | "phone" | "domain" | "currency" | "toponym" | "lexicon" | "landmark" | "scene" | "environment";
   frame: number;          // keyframe index the clue came from
   value: string;          // the literal evidence, e.g. "GJ 01 KA 4321"
   rationale: string;      // plain-language explanation
@@ -150,6 +151,40 @@ export function extractClues(frameIndex: number, rawText: string): Clue[] {
       rationale: `${c.label} present in on-screen text.`,
       candidates: [{ key: c.key, w: 0.3 }],
     });
+  }
+
+  // 5b. Place-word lexicon. Latin-script but non-English signage — "Sansad
+  //     Marg", "Jalan Sudirman", "Karol Bagh" — is invisible to the script
+  //     detector yet decisive. These matches never touch a gazetteer, so they
+  //     are allowed to anchor a country.
+  for (const entry of PLACE_LEXICON) {
+    for (const w of entry.words) {
+      const re = new RegExp(`(?:^|[^A-Za-z])${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z])`, "i");
+      const m = text.match(re);
+      if (!m) continue;
+      clues.push({
+        kind: "lexicon",
+        frame: frameIndex,
+        value: m[0].trim(),
+        rationale: `${entry.note}. Read directly from the frame, so it carries no gazetteer bias.`,
+        candidates: entry.candidates,
+      });
+      break; // one hit per lexicon row is enough
+    }
+  }
+
+  // 5c. Registration-plate layouts beyond India and the UK.
+  for (const fmt of PLATE_FORMATS) {
+    const re = new RegExp(fmt.re.source, fmt.re.flags);
+    for (const m of Array.from(upper.matchAll(re))) {
+      clues.push({
+        kind: "plate",
+        frame: frameIndex,
+        value: m[0].trim(),
+        rationale: `${fmt.note}.`,
+        candidates: fmt.candidates,
+      });
+    }
   }
 
   // 6. Candidate place names, resolved later against OpenStreetMap.

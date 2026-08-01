@@ -51,6 +51,7 @@ video file (never uploaded)
    │                         for the footage that has no legible text at all
    │
    ├─ 4. clue extraction ─── deterministic matchers over the recognised text:
+   │        • place-word lexicon (Marg, Chowk, Jalan, Straße…)
    │        • Unicode script blocks       → country priors
    │        • Indian / UK plate formats   → state or country
    │        • +CC dialling prefixes       → country
@@ -107,6 +108,29 @@ Delhi structures, so the confusion between them is the honest one to make.
 
 This is a **second opinion, clearly separated in the UI**. CLIP is confidently
 wrong on a regular basis. It can be switched off entirely.
+
+### The place-word lexicon
+
+The worst blind spot in a Latin-script OCR pipeline is text that is Latin but
+not English. "Sansad Marg", "Karol Bagh", "Jalan Sudirman", "Prospekt Peremohy"
+all read as plain Latin characters, so the script detector says nothing — yet
+the words themselves are decisive.
+
+`lib/lexicon.ts` matches street and administrative vocabulary across ~30
+language groups: Indian suffixes (*marg, chowk, nagar, vihar, bagh, ganj*),
+administrative terms (*thana, tehsil, mandal*), and their equivalents in German,
+French, Spanish, Portuguese, Turkish, Malay, Thai, Swahili and others. It also
+carries registration-plate layouts for Bangladesh, Pakistan, Mercosur, the
+Netherlands, Germany, Türkiye and the UAE alongside the original India and UK
+patterns.
+
+These matches **never touch a gazetteer**, so like a plate prefix they can
+anchor a country without inheriting OSM's mapping-density bias.
+
+**Tested:** "Sansad Marg" / "Karol Bagh Police Chowki" — no English place name
+and no non-Latin script anywhere — now produces three lexicon hits, anchors to
+India at 100%, and resolves Karol Bagh in Central Delhi. Before this, none of
+those words carried any signal at all.
 
 ### Country anchoring — why this exists
 
@@ -267,7 +291,7 @@ python3 scripts/make-test-clip.py     # writes ./test-clip.mp4
 
 - **Geolocation here is probabilistic.** Every result is a hypothesis to check, not a determination.
 - **No legible text means no result.** Silence from the tool is not evidence about the footage.
-- **OCR is noisy.** A misread plate prefix points confidently at the wrong state.
+- **OCR is noisy.** A misread plate prefix points confidently at the wrong state. Clues are down-weighted by keyframe focus and exposure, which reduces this but does not remove it.
 - **Signage travels.** A language on a shop front does not fix a country.
 - **Confidence is a share of recovered evidence weight,** not a probability of being correct.
 - **Region markers sit on centroids.** They mark a hypothesis area, never a camera position.
@@ -299,7 +323,10 @@ The UI states all of this in the "Method and limits" panel. Please leave it ther
 - [x] Saved investigation browser and shareable case links
 - [x] Scene-change threshold exposed in the UI, plus a keyframe-quality score
 - [ ] Bhuvan WMS layers rendered in-app rather than linked out
-- [ ] A larger landmark bank — the current one is ~70 entries and needs hundreds
+- [x] Place-word lexicon for Latin-script non-English signage
+- [x] Registration-plate formats beyond India and the UK
+- [x] Evidence weighted by keyframe focus and exposure
+- [ ] A larger landmark bank — the current one is ~120 entries and needs hundreds
 - [ ] GeoCLIP proper (needs an ONNX export; no browser-runnable build exists yet)
 - [ ] Community-contributed regional signage patterns beyond India, UK and the US
 
@@ -311,10 +338,11 @@ in `lib/regions.ts` and `lib/clues.ts` as plain data. If you know how plates or 
 country, that is a directly useful pull request.
 
 **The prompt banks in `lib/visual-priors.ts` are the easiest and most valuable place to contribute.**
-They are plain data — a description string, a note, and the regions it implies. If you know what the
+They are plain data — a description string, a note, and the regions it implies. `lib/lexicon.ts` is
+the same: one row per street-word or plate format. If you know what the
 street furniture, police uniforms, utility poles, number plates or bus liveries look like where you
 work, that is a directly useful pull request and needs no machine-learning knowledge. The landmark
-bank is currently ~70 entries and is heavily under-covered outside India, the US and Europe.
+bank is currently ~120 entries and is still heavily under-covered outside India, the US and Europe.
 
 Two rules: no paid or proprietary vision APIs, and no clue may be added without a human-readable
 `rationale` string explaining it.

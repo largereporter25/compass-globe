@@ -207,7 +207,7 @@ export default function Page() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           videoName: file.name, durationSec, visualClues,
-          frames: complete.map((f) => ({ idx: f.idx, tSec: f.tSec, text: f.text, confidence: f.confidence, thumb: f.thumb })),
+          frames: complete.map((f) => ({ idx: f.idx, tSec: f.tSec, text: f.text, confidence: f.confidence, quality: f.quality, thumb: f.thumb })),
         }),
       });
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `server returned ${res.status}`);

@@ -12,7 +12,8 @@ type FramePayload = {
   tSec: number;
   text: string;
   confidence: number;
-  thumb?: string; // small jpeg data URL, only stored when a database is configured
+  quality?: number; // 0-100 focus/exposure score from the browser
+  thumb?: string;   // small jpeg data URL, only stored when a database is configured
 };
 
 type Body = {
@@ -38,7 +39,24 @@ export async function POST(req: Request) {
   }
 
   const rawClues: Clue[] = [];
-  for (const f of frames) rawClues.push(...extractClues(f.idx, f.text || ""));
+  for (const f of frames) {
+    const clues = extractClues(f.idx, f.text || "");
+    // Evidence read off a soft or badly exposed frame is worth less. OCR
+    // confidence alone is not enough — Tesseract is happy to report 90% on a
+    // confidently misread word — so focus and exposure are folded in too.
+    const q = typeof f.quality === "number" ? Math.max(0, Math.min(100, f.quality)) / 100 : 1;
+    const ocrConf = typeof f.confidence === "number" ? Math.max(0, Math.min(100, f.confidence)) / 100 : 1;
+    const reliability = 0.45 + 0.3 * q + 0.25 * ocrConf; // 0.45 floor, 1.0 ceiling
+    if (reliability < 0.999) {
+      for (const c of clues) {
+        c.candidates = c.candidates.map((x) => ({ ...x, w: Number((x.w * reliability).toFixed(4)) }));
+        if (q < 0.4) {
+          c.rationale += ` Read from a low-quality keyframe (focus/exposure ${Math.round(q * 100)}/100), so this clue is down-weighted.`;
+        }
+      }
+    }
+    rawClues.push(...clues);
+  }
 
   const visual = Array.isArray(body.visualClues) ? body.visualClues : [];
   for (const v of visual) {

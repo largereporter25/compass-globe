@@ -137,23 +137,55 @@ async function scoreFrame(ctx: NonNullable<typeof cached>, blob: Blob, frameInde
 
   // Landmarks. A high bar on purpose — a false landmark hit is the single most
   // misleading thing this tool could output, because it looks like certainty.
-  let bestLandmark = -1;
-  for (let i = 0; i < nLandmarks; i++) {
-    if (bestLandmark < 0 || probs[i] > probs[bestLandmark]) bestLandmark = i;
-  }
-  if (bestLandmark >= 0 && probs[bestLandmark] >= 0.22) {
-    const lm = LANDMARKS[bestLandmark];
+  const ranked = Array.from({ length: nLandmarks }, (_, i) => i).sort((a, b) => probs[b] - probs[a]);
+  const bestLandmark = ranked[0] ?? -1;
+  const runnerUp = ranked[1] != null ? probs[ranked[1]] : 0;
+  const bestNegative = Math.max(...NEGATIVE_PROMPTS.map((_, i) => probs[nLandmarks + nScenes + i]));
+
+  // Three conditions, all of which have to hold. An absolute floor, a clear
+  // margin over the next landmark (otherwise the model is guessing between
+  // lookalikes), and it must beat the "unremarkable frame" prompts — which is
+  // what stops a blurry wall from being confidently identified as a monument.
+  const clearWinner =
+    bestLandmark >= 0 &&
+    probs[bestLandmark] >= 0.18 &&
+    probs[bestLandmark] >= runnerUp * 1.35 &&
+    probs[bestLandmark] > bestNegative;
+
+  // Two visually similar landmarks — say, two red-sandstone Mughal monuments
+  // in Delhi — will legitimately score close together. Rejecting both would
+  // throw away a perfectly good country signal, so when the pair agrees on a
+  // country they are both kept at reduced weight and the ambiguity is stated.
+  const tiedPair =
+    !clearWinner &&
+    bestLandmark >= 0 &&
+    ranked[1] != null &&
+    probs[bestLandmark] >= 0.14 &&
+    probs[bestLandmark] > bestNegative &&
+    LANDMARKS[bestLandmark].countryCode === LANDMARKS[ranked[1]].countryCode;
+
+  const emit = (i: number, factor: number, ambiguousWith?: string) => {
+    const lm = LANDMARKS[i];
     out.push({
       kind: "landmark",
       frame: frameIndex,
       value: lm.label,
-      rationale: `CLIP matched this frame to "${lm.prompt}" at ${(probs[bestLandmark] * 100).toFixed(0)}% of the bank's total score. Visual match only — confirm against a reference photograph before relying on it.`,
-      score: Number(probs[bestLandmark].toFixed(4)),
-      candidates: [{ key: lm.countryCode, w: 0.5 }],
+      rationale: ambiguousWith
+        ? `CLIP scored this frame ${(probs[i] * 100).toFixed(0)}% against "${lm.prompt}", too close to "${ambiguousWith}" to separate them. Both are kept at reduced weight because they agree on the country. Visual match only.`
+        : `CLIP matched this frame to "${lm.prompt}" at ${(probs[i] * 100).toFixed(0)}% of the bank's total score, ${(probs[i] / Math.max(runnerUp, 1e-6)).toFixed(1)}x clear of the next landmark. Visual match only — confirm against a reference photograph before relying on it.`,
+      score: Number((probs[i] * factor).toFixed(4)),
+      candidates: [{ key: lm.countryCode, w: 0.5 * factor }],
       lat: lm.lat,
       lon: lm.lon,
       countryCode: lm.countryCode,
     });
+  };
+
+  if (clearWinner) {
+    emit(bestLandmark, 1);
+  } else if (tiedPair) {
+    emit(bestLandmark, 0.6, LANDMARKS[ranked[1]].label);
+    emit(ranked[1], 0.6, LANDMARKS[bestLandmark].label);
   }
 
   // Streetscape signatures. Lower bar: these are meant to accumulate across

@@ -110,7 +110,11 @@ export async function infer(rawClues: Clue[]): Promise<InferenceResult> {
   const countryVotes = new Map<string, number>();
   for (const clue of clues) {
     if (clue.kind !== "landmark" || clue.lat == null || clue.lon == null) continue;
-    const weight = 0.5 + Math.min(clue.score ?? 0, 0.6);
+    // A landmark seen in several keyframes is far more trustworthy than a
+    // single lucky frame, so corroboration counts for more than raw score.
+    const seenIn = (clue as any).frames?.length ?? 1;
+    const corroboration = Math.min(1 + (seenIn - 1) * 0.45, 2.4);
+    const weight = (0.45 + Math.min(clue.score ?? 0, 0.6)) * corroboration;
     add(
       `LM:${clue.value}`, clue.lat, clue.lon, clue.value,
       resolveRegion(clue.countryCode ?? "")?.label ?? clue.countryCode ?? "Unknown",
