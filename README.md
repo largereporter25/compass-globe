@@ -66,20 +66,23 @@ video file (never uploaded)
    │
    ├─ 7. KartaView + Panoramax + Mapillary ─── street-level imagery near the lead candidate
    │
-   ├─ 8. weighted aggregation ──── ranked candidates + confidence band
+   ├─ 8. SIGINT overlays ───────── GPSJam (ADS-B-derived GNSS interference) +
+   │                               OpenSky (live aircraft) for the top candidates
    │
-   ├─ 9. globe + reasoning trail ─ every candidate shows the clues that produced it
+   ├─ 9. weighted aggregation ──── ranked candidates + confidence band
    │
-   └─ 10. Shadowline ────────────── solar geometry turns a shadow direction
+   ├─ 10. globe + reasoning trail ─ every candidate shows the clues that produced it
+   │
+   └─ 11. Shadowline ────────────── solar geometry turns a shadow direction
                                    into a time-of-day window
 ```
 
 ### The vision pass — for footage with no text
 
 Most viral disinformation clips have no legible signage. A text-only pipeline
-has a hard ceiling there, so Compass Globe runs OpenAI's CLIP ViT-B/32 in the
-browser through transformers.js and scores every keyframe against two prompt
-banks in `lib/visual-priors.ts`:
+has a hard ceiling there, so Compass Globe runs two open-source contrastive
+models in the browser through transformers.js and scores every keyframe
+against two prompt banks in `lib/visual-priors.ts`:
 
 - **Landmarks** — distinctive built structures with real coordinates. A hit
   here is the strongest clue the tool can produce, because it points at a place
@@ -101,13 +104,22 @@ becomes a single image embedding and the rest is cosine similarity. That keeps
 a 200-prompt bank affordable on a laptop CPU. Weights download once from the
 Hugging Face CDN and are then cached — the images never leave the tab.
 
+A second model, Google's **SigLIP** (base patch16-224, Apache-2.0), runs on the
+same transformers.js runtime alongside CLIP. Its errors do not correlate with
+CLIP's, so the two models' per-prompt probability distributions are averaged
+into one ensemble score. The landmark bar only clears when *both* lean the same
+way, which is deliberately conservative — a false landmark match is the most
+misleading thing this tool could output. If SigLIP fails to load, the pass
+falls back to CLIP-only and the toggle says so.
+
 **Tested:** a clip built only from Jantar Mantar photographs, with no readable
 text in any frame, returns *Jantar Mantar, New Delhi* and *Red Fort, Delhi* as
 the top two candidates, anchored to India. Both are red-sandstone Mughal-era
 Delhi structures, so the confusion between them is the honest one to make.
 
-This is a **second opinion, clearly separated in the UI**. CLIP is confidently
-wrong on a regular basis. It can be switched off entirely.
+This is a **second opinion, clearly separated in the UI**. Both models are
+confidently wrong on a regular basis. The vision pass can be switched off
+entirely.
 
 ### The place-word lexicon
 
@@ -248,8 +260,9 @@ correct. Bands are `Weak` / `Moderate` / `Strong`.
 | OCR | `tesseract.js` | Runs client-side, ~20 scripts, no key |
 | Clue engine | Plain TypeScript in `lib/clues.ts` | Deterministic and auditable beats opaque and slightly better |
 | Gazetteer | OpenStreetMap Nominatim | Free, keyless, ODbL |
-| Vision | CLIP ViT-B/32 via `@xenova/transformers`, in-browser | Landmark and streetscape recognition without a paid vision API |
-| Street imagery | KartaView + Panoramax (keyless) + Mapillary (optional token) | CC BY-SA, complementary Global South coverage, works with zero configuration |
+| Vision | CLIP ViT-B/32 + SigLIP base (Apache-2.0) via `@huggingface/transformers`, in-browser ensemble | Landmark and streetscape recognition without a paid vision API; two models' scores are averaged |
+| Street imagery | KartaView + Panoramax (keyless) + Mapillary (optional token) + Copernicus Sentinel-2 (optional token) | CC BY-SA, complementary Global South coverage, works with zero configuration |
+| SIGINT overlays | GPSJam (ADS-B-derived GNSS interference) + OpenSky (live aircraft) | Keyless situational context in the panel, not a location fix |
 | India terrain | Bhuvan (ISRO) deep link | Authoritative Indian satellite and land-use data, opened for manual cross-check |
 | Globe | `react-globe.gl` / three.js slippy-tile engine | Real satellite, street and terrain tiles, zoomable to street level |
 | Database | Neon Postgres over HTTP | Serverless-friendly; app degrades gracefully without it |
@@ -262,11 +275,12 @@ app/
 lib/
   pipeline.ts               browser-side extraction + Tesseract + frame stats
   sun.ts                    NOAA solar position and shadow-window solver
-  vision.ts                 CLIP embedding pass, runs in the browser
+  vision.ts                 CLIP + SigLIP ensemble pass, runs in the browser
   visual-priors.ts          landmark and streetscape prompt banks (plain data)
   clues.ts                  deterministic clue matchers
   regions.ts                centroids, plate prefixes, dialling codes, script priors
-  geo.ts                    Nominatim, Mapillary, KartaView, Panoramax, Bhuvan
+  geo.ts                    Nominatim, Mapillary, KartaView, Panoramax, Copernicus, Bhuvan
+  sigint.ts                 GPSJam + OpenSky overlays (server-side)
   infer.ts                  evidence weighting and ranking
   db.ts                     Neon client + schema
 app/cases/                  saved investigation browser and shareable records
@@ -337,7 +351,7 @@ python3 scripts/make-test-clip.py     # writes ./test-clip.mp4
 - **The country anchor can be wrong.** If it is, the right answer is demoted rather than removed — read the `conflicts` rows.
 - **Anchoring needs bias-free evidence.** A clip with nothing but generic Latin signage has nothing to anchor on, and stays vulnerable to gazetteer skew.
 - **Green-pixel share and luma are observations only.** They are displayed, never scored.
-- **CLIP is confidently wrong.** A landmark match is a visual similarity score, not an identification. Always confirm against a reference photograph.
+- **The vision pass is confidently wrong.** A landmark match is a visual similarity score from two models, not an identification. Always confirm against a reference photograph.
 - **The landmark bank is small and unevenly distributed.** A place that is not in it cannot be recognised, and absence means nothing.
 - **The vision pass is slow on CPU.** Expect a minute or more for a first run while weights download.
 - **Shadow timing assumes the date you enter** and a flat, unobstructed horizon.
@@ -362,6 +376,9 @@ The UI states all of this in the "Method and limits" panel. Please leave it ther
 - [x] Scene-change threshold exposed in the UI, plus a keyframe-quality score
 - [x] Real satellite, street and terrain basemaps with street-level descent
 - [x] WebGPU inference path with automatic WASM fallback
+- [x] SigLIP second vision model, ensemble-scored alongside CLIP
+- [x] Optional Copernicus Sentinel-2 high-res scene previews
+- [x] GPSJam + OpenSky SIGINT/open-data overlays for the top candidates
 - [ ] Bhuvan WMS layers rendered in-app rather than linked out
 - [x] Place-word lexicon for Latin-script non-English signage
 - [x] Registration-plate formats beyond India and the UK

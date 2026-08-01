@@ -33,6 +33,7 @@ type Candidate = {
   bhuvanUrl?: string | null;
   reasons: { frame: number; kind: string; value: string; rationale: string; weight: number }[];
   streetImages?: StreetImage[];
+  sigint?: { source: string; title: string; detail: string; link: string; lat?: number; lon?: number }[];
 };
 
 type AnalyzeResponse = {
@@ -738,6 +739,27 @@ export default function Page() {
                           </div>
                           <p className="mt-2 text-xs text-bone-600">
                             Community imagery, CC BY-SA. Compare it yourself — the tool makes no claim that these match.
+                          </p>
+                        </>
+                      ) : null}
+
+                      {activeCandidate.sigint?.length ? (
+                        <>
+                          <p className="marker mb-2 mt-6">SIGINT &amp; open-data</p>
+                          <ul className="space-y-1.5">
+                            {activeCandidate.sigint.map((s, i) => (
+                              <li key={s.source + i} className="border-l-2 border-ink-600 pl-2.5">
+                                <div className="flex items-baseline justify-between gap-2">
+                                  <span className="font-mono text-[10px] uppercase tracking-wide text-signal">{s.source}</span>
+                                  <a href={s.link} target="_blank" rel="noreferrer" className="font-mono text-[10px] text-bone-500 hover:text-bone-200">link ↗</a>
+                                </div>
+                                <span className="block text-xs font-semibold text-bone-100">{s.title}</span>
+                                <span className="mt-0.5 block text-[11px] leading-snug text-bone-500">{s.detail}</span>
+                              </li>
+                            ))}
+                          </ul>
+                          <p className="mt-2 text-xs text-bone-600">
+                            GPSJam (ADS-B-derived interference) and OpenSky (live aircraft) — situational context, not a location fix.
                           </p>
                         </>
                       ) : null}

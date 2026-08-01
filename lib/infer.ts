@@ -16,6 +16,7 @@ import type { Clue } from "./clues";
 import { dedupeClues } from "./clues";
 import { bhuvanLink, copernicusNear, geocode, kartaviewNear, mapillaryNear, panoramaxNear, type StreetImage } from "./geo";
 import { resolveRegion } from "./regions";
+import { sigintAt, type SigintReport } from "./sigint";
 
 export type Candidate = {
   key: string;
@@ -33,6 +34,7 @@ export type Candidate = {
   reasons: { frame: number; kind: string; value: string; rationale: string; weight: number }[];
   streetImages?: StreetImage[];
   bhuvanUrl?: string | null;
+  sigint?: SigintReport[];
 };
 
 export type InferenceResult = {
@@ -256,6 +258,20 @@ export async function infer(rawClues: Clue[]): Promise<InferenceResult> {
     const imgs = [...cop, ...mly, ...kv, ...pnx].slice(0, 6);
     if (imgs.length) imageryTarget.streetImages = imgs;
   }
+
+  // SIGINT / open-data overlays for situational awareness, attached to the top
+  // candidates so an investigator can compare hypotheses. Both sources are
+  // keyless and degrade to [] on any error, so a blocked region or a rate
+  // limit just leaves the panel entry empty rather than failing the analysis.
+  await Promise.all(
+    top.slice(0, 3).map(async (c) => {
+      try {
+        c.sigint = await sigintAt(c.lat, c.lon);
+      } catch {
+        c.sigint = [];
+      }
+    })
+  );
 
   const anchorRegion = anchor ? resolveRegion(anchor.code) : null;
   const anchorOut = anchor
