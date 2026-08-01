@@ -68,6 +68,11 @@ export function visionBackend(): { device: "webgpu" | "wasm"; dtype: "fp16" | "q
 let activeBackend: "webgpu" | "wasm" | null = null;
 export const getActiveBackend = () => activeBackend;
 
+// Whether the ensemble ran or the pass fell back to CLIP alone. Read by the UI
+// after a run so the fallback is told to the investigator rather than silent.
+let visionMode: "clip+siglip" | "clip" | null = null;
+export const getVisionMode = () => visionMode;
+
 export type VisualClue = {
   kind: "landmark" | "scene" | "environment";
   frame: number;
@@ -231,6 +236,7 @@ export async function loadVision(onProgress: (p: Progress) => void) {
   }
 
   cached = { clip, siglip };
+  visionMode = siglip ? "clip+siglip" : "clip";
   return cached;
 }
 

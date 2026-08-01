@@ -72,6 +72,7 @@ export default function Page() {
   const [basemap, setBasemap] = useState<BasemapKey>("satellite");
   const [zoomToken, setZoomToken] = useState(0);
   const [visionBackendUsed, setVisionBackendUsed] = useState<string | null>(null);
+  const [visionModeUsed, setVisionModeUsed] = useState<"clip+siglip" | "clip" | null>(null);
 
   // Shadowline inputs
   const [shDate, setShDate] = useState(() => new Date().toISOString().slice(0, 10));
@@ -191,10 +192,11 @@ export default function Page() {
     let visualClues: VisualClue[] = [];
     if (useVision) {
       try {
-        const { analyseFrames, getActiveBackend } = await import("@/lib/vision");
+        const { analyseFrames, getActiveBackend, getVisionMode } = await import("@/lib/vision");
         visualClues = await analyseFrames(raw, (p) => { setProgress(p); pushLog(p.detail); });
         setVisionBackendUsed(getActiveBackend());
-        pushLog(`${visualClues.length} visual clues from CLIP on ${getActiveBackend()?.toUpperCase()}`);
+        setVisionModeUsed(getVisionMode());
+        pushLog(`${visualClues.length} visual clues from ${getVisionMode() === "clip+siglip" ? "CLIP + SigLIP ensemble" : "CLIP only"} on ${getActiveBackend()?.toUpperCase()}`);
       } catch (e: any) {
         console.error("vision pass failed:", e);
         pushLog(`Vision pass skipped: ${e?.message || e}`);
@@ -257,7 +259,7 @@ export default function Page() {
     L.push(`\n## Method\n`);
     L.push(`- Keyframes: ${frames.length}, extracted via ${extractMethod}`);
     L.push(`- OCR scripts: ${langs.join(", ")}`);
-    L.push(`- Vision pass: ${useVision ? `CLIP ViT-B/32 in-browser (${visionBackendUsed ?? "wasm"})` : "disabled"}`);
+    L.push(`- Vision pass: ${useVision ? `${visionModeUsed === "clip+siglip" ? "CLIP + SigLIP ensemble" : "CLIP ViT-B/32"} in-browser (${visionBackendUsed ?? "wasm"}${visionModeUsed === "clip" ? ", SigLIP unavailable" : ""})` : "disabled"}`);
     if (result.anchorCountry) L.push(`- Country anchor: ${result.anchorCountry.label} (${(result.anchorCountry.strength * 100).toFixed(0)}% of bias-free evidence)`);
     L.push(`- Gazetteer lookups: ${result.geocodeHits} resolved of ${result.geocodeAttempts} attempted (OpenStreetMap Nominatim)`);
     L.push(`\n## Candidates\n`);
@@ -556,6 +558,9 @@ export default function Page() {
                   <span className="block font-display text-sm font-semibold text-bone-100">Vision pass (CLIP + SigLIP)</span>
                   <span className="mt-0.5 block text-xs text-bone-600">
                     Recognises landmarks and streetscape signatures when there is no legible text
+                    {useVision && visionModeUsed === "clip" && (
+                      <span className="text-signal/80"> · SigLIP could not load — running CLIP only</span>
+                    )}
                   </span>
                 </span>
                 <span className={`ml-3 shrink-0 font-mono text-[11px] ${useVision ? "text-signal" : "text-bone-600"}`}>
