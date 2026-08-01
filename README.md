@@ -329,6 +329,12 @@ python3 scripts/make-test-clip.py     # writes ./test-clip.mp4
 
 ### Deployment notes
 
+- `/api/health` is a read-only uptime probe — `GET /api/health` returns liveness, the DB state
+  (`ok`/`error`/`unconfigured`), and whether the optional Mapillary/Copernicus backends are
+  configured. It returns 503 when the configured DB is unreachable. Point an uptime monitor at it.
+- If you are updating an **existing** Neon database, re-run `npm run db:init` so the idempotent
+  `alter table ... add column if not exists model` adds the new `clues.model` column; existing rows
+  stay readable with `model = null`, no backfill needed.
 - `/api/analyze` makes up to six sequential Nominatim lookups at ~1 request/second, so the route can
   run for 6–8 seconds. It declares `maxDuration = 60`. On Vercel Hobby without Fluid compute the
   ceiling is lower — reduce `MAX_GEOCODES` in `lib/infer.ts` if you hit a timeout.
