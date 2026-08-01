@@ -3,7 +3,7 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import Logo from "@/components/Logo";
-import type { GlobePoint } from "@/components/Globe";
+import { BASEMAP_KEYS, basemapLabel, type BasemapKey, type GlobePoint } from "@/components/Globe";
 import {
   OCR_LANGS,
   extractKeyframes,
@@ -69,6 +69,9 @@ export default function Page() {
   const [tab, setTab] = useState<Tab>("frames");
   const [showMethod, setShowMethod] = useState(false);
   const [showSetup, setShowSetup] = useState(true);
+  const [basemap, setBasemap] = useState<BasemapKey>("satellite");
+  const [zoomToken, setZoomToken] = useState(0);
+  const [visionBackendUsed, setVisionBackendUsed] = useState<string | null>(null);
 
   // Shadowline inputs
   const [shDate, setShDate] = useState(() => new Date().toISOString().slice(0, 10));
@@ -188,9 +191,10 @@ export default function Page() {
     let visualClues: VisualClue[] = [];
     if (useVision) {
       try {
-        const { analyseFrames } = await import("@/lib/vision");
+        const { analyseFrames, getActiveBackend } = await import("@/lib/vision");
         visualClues = await analyseFrames(raw, (p) => { setProgress(p); pushLog(p.detail); });
-        pushLog(`${visualClues.length} visual clues from CLIP`);
+        setVisionBackendUsed(getActiveBackend());
+        pushLog(`${visualClues.length} visual clues from CLIP on ${getActiveBackend()?.toUpperCase()}`);
       } catch (e: any) {
         console.error("vision pass failed:", e);
         pushLog(`Vision pass skipped: ${e?.message || e}`);
@@ -253,7 +257,7 @@ export default function Page() {
     L.push(`\n## Method\n`);
     L.push(`- Keyframes: ${frames.length}, extracted via ${extractMethod}`);
     L.push(`- OCR scripts: ${langs.join(", ")}`);
-    L.push(`- Vision pass: ${useVision ? "CLIP ViT-B/32 in-browser" : "disabled"}`);
+    L.push(`- Vision pass: ${useVision ? `CLIP ViT-B/32 in-browser (${visionBackendUsed ?? "wasm"})` : "disabled"}`);
     if (result.anchorCountry) L.push(`- Country anchor: ${result.anchorCountry.label} (${(result.anchorCountry.strength * 100).toFixed(0)}% of bias-free evidence)`);
     L.push(`- Gazetteer lookups: ${result.geocodeHits} resolved of ${result.geocodeAttempts} attempted (OpenStreetMap Nominatim)`);
     L.push(`\n## Candidates\n`);
@@ -320,8 +324,33 @@ export default function Page() {
         {/* ══ Globe ═════════════════════════════════════════════ */}
         <section className="relative min-h-[44vh] min-w-0 flex-1 overflow-hidden">
           <div className="absolute inset-0">
-            <CompassGlobe points={points} selected={selectedCandidate} onSelect={setSelectedCandidate} />
+            <CompassGlobe points={points} selected={selectedCandidate} onSelect={setSelectedCandidate} basemap={basemap} zoomToken={zoomToken} />
           </div>
+
+          <div className="absolute left-6 top-6 flex border-2 border-bone-100 bg-ink-950">
+            {BASEMAP_KEYS.map((k, i) => (
+              <button
+                key={k}
+                onClick={() => setBasemap(k)}
+                data-testid={`button-basemap-${k}`}
+                className={`px-3 py-1.5 font-display text-xs font-semibold ${i > 0 ? "border-l border-ink-700" : ""} ${
+                  basemap === k ? "bg-bone-100 text-ink-950" : "text-bone-400 hover:text-bone-100"
+                }`}
+              >
+                {basemapLabel(k)}
+              </button>
+            ))}
+          </div>
+
+          {result && result.candidates.length > 0 && (
+            <button
+              onClick={() => setZoomToken((z) => z + 1)}
+              data-testid="button-zoom-street"
+              className="absolute right-6 top-6 border-2 border-signal bg-signal px-4 py-2 font-display text-sm font-bold uppercase tracking-wide text-ink-950 hover:bg-bone-100 hover:border-bone-100"
+            >
+              Descend to street
+            </button>
+          )}
 
           {!result && !busy && (
             <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
@@ -530,7 +559,7 @@ export default function Page() {
                   </span>
                 </span>
                 <span className={`ml-3 shrink-0 font-mono text-[11px] ${useVision ? "text-signal" : "text-bone-600"}`}>
-                  {useVision ? "ON" : "OFF"}
+                  {useVision ? (visionBackendUsed ? visionBackendUsed.toUpperCase() : "ON") : "OFF"}
                 </span>
               </button>
             </div>
@@ -651,6 +680,30 @@ export default function Page() {
                           </li>
                         ))}
                       </ul>
+                      <div className="mt-4 grid grid-cols-3 gap-px bg-ink-700">
+                        <button
+                          onClick={() => setZoomToken((z) => z + 1)}
+                          className="bg-ink-950 px-2 py-2.5 font-display text-xs font-semibold text-bone-200 hover:text-signal"
+                          data-testid="button-trail-zoom"
+                        >
+                          Zoom here
+                        </button>
+                        <a
+                          href={`https://www.openstreetmap.org/?mlat=${activeCandidate.lat}&mlon=${activeCandidate.lon}#map=18/${activeCandidate.lat}/${activeCandidate.lon}`}
+                          target="_blank" rel="noreferrer"
+                          className="bg-ink-950 px-2 py-2.5 text-center font-display text-xs font-semibold text-bone-200 hover:text-signal"
+                        >
+                          OpenStreetMap
+                        </a>
+                        <a
+                          href={`https://www.openstreetmap.org/edit#map=19/${activeCandidate.lat}/${activeCandidate.lon}`}
+                          target="_blank" rel="noreferrer"
+                          className="bg-ink-950 px-2 py-2.5 text-right font-display text-xs font-semibold text-bone-200 hover:text-signal"
+                        >
+                          Trace view
+                        </a>
+                      </div>
+
                       {activeCandidate.bhuvanUrl && (
                         <a
                           href={activeCandidate.bhuvanUrl} target="_blank" rel="noreferrer"

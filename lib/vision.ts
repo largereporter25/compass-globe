@@ -17,21 +17,44 @@
 // in the UI. CLIP is confidently wrong on a regular basis and the interface
 // says so.
 
-import {
-  AutoProcessor,
-  AutoTokenizer,
-  CLIPTextModelWithProjection,
-  CLIPVisionModelWithProjection,
-  RawImage,
-  env,
-} from "@xenova/transformers";
 import { LANDMARKS, NEGATIVE_PROMPTS, SCENE_PRIORS } from "./visual-priors";
 import type { Progress } from "./pipeline";
 
-// No local model server; pull from the CDN once, then rely on browser cache.
-env.allowLocalModels = false;
+// transformers.js is loaded as a native ES module at runtime rather than
+// bundled. Two reasons: its ONNX Runtime build uses `import.meta` in a way
+// Next's minifier rejects, and keeping ~40 MB of inference runtime out of the
+// main bundle means the app still loads instantly for anyone who leaves the
+// vision pass switched off.
+const TRANSFORMERS_URL = "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.5.1";
+
+let libPromise: Promise<any> | null = null;
+function loadLib(): Promise<any> {
+  if (!libPromise) {
+    libPromise = import(/* webpackIgnore: true */ TRANSFORMERS_URL).then((m: any) => {
+      m.env.allowLocalModels = false;
+      return m;
+    });
+  }
+  return libPromise;
+}
 
 const MODEL_ID = "Xenova/clip-vit-base-patch32";
+
+/**
+ * WebGPU where the browser has it, WASM everywhere else.
+ *
+ * On a machine with WebGPU this is the difference between a vision pass that
+ * takes a couple of seconds and one that takes minutes, which matters a great
+ * deal when an investigator is working through a stack of clips. The fallback
+ * is silent and automatic — the pass still runs on any browser, just slower.
+ */
+export function visionBackend(): { device: "webgpu" | "wasm"; dtype: "fp16" | "q8" } {
+  const hasGpu = typeof navigator !== "undefined" && "gpu" in navigator;
+  return hasGpu ? { device: "webgpu", dtype: "fp16" } : { device: "wasm", dtype: "q8" };
+}
+
+let activeBackend: "webgpu" | "wasm" | null = null;
+export const getActiveBackend = () => activeBackend;
 
 export type VisualClue = {
   kind: "landmark" | "scene" | "environment";
@@ -91,14 +114,38 @@ function allPrompts(): string[] {
 export async function loadVision(onProgress: (p: Progress) => void) {
   if (cached) return cached;
 
-  onProgress({ stage: "vision", detail: "Loading the CLIP vision model (first run downloads it once)", pct: 0.5 });
+  const {
+    AutoProcessor, AutoTokenizer, CLIPTextModelWithProjection, CLIPVisionModelWithProjection,
+  } = await loadLib();
 
-  const [tokenizer, processor, textModel, visionModel] = await Promise.all([
-    AutoTokenizer.from_pretrained(MODEL_ID),
-    AutoProcessor.from_pretrained(MODEL_ID),
-    CLIPTextModelWithProjection.from_pretrained(MODEL_ID, { quantized: true }),
-    CLIPVisionModelWithProjection.from_pretrained(MODEL_ID, { quantized: true }),
-  ]);
+  const load = async (device: "webgpu" | "wasm", dtype: "fp16" | "q8") => {
+    onProgress({
+      stage: "vision",
+      detail: `Loading the CLIP vision model on ${device.toUpperCase()} (first run downloads it once)`,
+      pct: 0.5,
+    });
+    const opts = { device, dtype } as any;
+    return Promise.all([
+      AutoTokenizer.from_pretrained(MODEL_ID),
+      AutoProcessor.from_pretrained(MODEL_ID),
+      CLIPTextModelWithProjection.from_pretrained(MODEL_ID, opts),
+      CLIPVisionModelWithProjection.from_pretrained(MODEL_ID, opts),
+    ]);
+  };
+
+  const preferred = visionBackend();
+  let tokenizer: any, processor: any, textModel: any, visionModel: any;
+  try {
+    [tokenizer, processor, textModel, visionModel] = await load(preferred.device, preferred.dtype);
+    activeBackend = preferred.device;
+  } catch (err) {
+    if (preferred.device !== "webgpu") throw err;
+    // A browser can advertise navigator.gpu and still fail to get an adapter,
+    // so a working CPU fallback is not optional.
+    onProgress({ stage: "vision", detail: "WebGPU was unavailable — falling back to WASM", pct: 0.5 });
+    [tokenizer, processor, textModel, visionModel] = await load("wasm", "q8");
+    activeBackend = "wasm";
+  }
 
   onProgress({ stage: "vision", detail: "Encoding the visual clue bank", pct: 0.56 });
 
@@ -123,6 +170,7 @@ export async function loadVision(onProgress: (p: Progress) => void) {
 
 /** Score one frame against the whole bank and return the clues worth keeping. */
 async function scoreFrame(ctx: NonNullable<typeof cached>, blob: Blob, frameIndex: number): Promise<VisualClue[]> {
+  const { RawImage } = await loadLib();
   const image = await RawImage.fromBlob(blob);
   const inputs = await ctx.processor(image);
   const { image_embeds } = await ctx.visionModel(inputs);
