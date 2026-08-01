@@ -1,21 +1,32 @@
 "use client";
 
-// CLIP vision pass — the layer that works when there is no legible text.
+// Vision pass — the layer that works when there is no legible text.
 //
-// Runs OpenAI's CLIP ViT-B/32 entirely in the browser through transformers.js
-// (ONNX Runtime Web). The model weights are fetched once from the Hugging Face
-// CDN and cached by the browser; after that it is fully offline, and the image
-// data never leaves the tab.
+// Two open-source, keyless models run side by side, each entirely in the
+// browser through transformers.js (ONNX Runtime Web):
+//
+//   - CLIP ViT-B/32 (Xenova/clip-vit-base-patch32) — the original pass.
+//   - SigLIP base  patch16-224 (Xenova/siglip-base-patch16-224) — a second,
+//     independently-trained contrastive model whose errors do not correlate
+//     with CLIP's. Google released SigLIP under Apache-2.0; the ONNX export
+//     is keyless and runs on the same transformers.js runtime as CLIP, so no
+//     second inference engine is pulled in.
+//
+// Both models are zero-shot image-vs-text classifiers over the same prompt
+// bank. Their probability vectors are combined into an ensemble score (see
+// scoreFrame). Neither replaces the other: if SigLIP fails to load — a slow
+// CDN, an unsupported dtype, an out-of-memory WASM heap — the pass degrades
+// to CLIP-only and the interface says so rather than failing silently.
 //
 // The approach is deliberate: text embeddings for the whole prompt bank are
-// computed once and reused, then each keyframe becomes a single image
-// embedding and everything is cosine similarity. That keeps a 200-prompt bank
-// affordable on a laptop CPU, where the naive zero-shot pipeline would
+// computed once per model and reused, then each keyframe becomes a single
+// image embedding and everything is cosine similarity. That keeps a 200-prompt
+// bank affordable on a laptop CPU, where the naive zero-shot pipeline would
 // re-encode every prompt for every frame.
 //
 // This is explicitly a *second opinion*, kept separate from the text evidence
-// in the UI. CLIP is confidently wrong on a regular basis and the interface
-// says so.
+// in the UI. Both models are confidently wrong on a regular basis and the
+// interface says so.
 
 import { LANDMARKS, NEGATIVE_PROMPTS, SCENE_PRIORS } from "./visual-priors";
 import type { Progress } from "./pipeline";
@@ -24,7 +35,7 @@ import type { Progress } from "./pipeline";
 // bundled. Two reasons: its ONNX Runtime build uses `import.meta` in a way
 // Next's minifier rejects, and keeping ~40 MB of inference runtime out of the
 // main bundle means the app still loads instantly for anyone who leaves the
-// vision pass switched off.
+// vision pass switched off. Both CLIP and SigLIP share this one import.
 const TRANSFORMERS_URL = "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.5.1";
 
 let libPromise: Promise<any> | null = null;
@@ -38,7 +49,8 @@ function loadLib(): Promise<any> {
   return libPromise;
 }
 
-const MODEL_ID = "Xenova/clip-vit-base-patch32";
+const CLIP_MODEL_ID = "Xenova/clip-vit-base-patch32";
+const SIGLIP_MODEL_ID = "Xenova/siglip-base-patch16-224";
 
 /**
  * WebGPU where the browser has it, WASM everywhere else.
@@ -68,18 +80,19 @@ export type VisualClue = {
   countryCode?: string;
 };
 
-type Bank = {
-  prompts: string[];
-  textEmbeddings: number[][];
-};
-
-let cached: {
+// One model's loaded state: its tokenizer/processor/encoders plus the prompt
+// bank pre-encoded into a normalized text-embedding matrix. CLIP and SigLIP
+// each own one of these; SigLIP's is null when it could not be loaded.
+type ModelBank = { prompts: string[]; textEmbeddings: number[][] };
+type ModelCtx = {
   tokenizer: any;
   processor: any;
   textModel: any;
   visionModel: any;
-  bank: Bank;
-} | null = null;
+  bank: ModelBank;
+};
+
+let cached: { clip: ModelCtx; siglip: ModelCtx | null } | null = null;
 
 function l2normalize(v: number[]): number[] {
   let n = 0;
@@ -102,7 +115,7 @@ function softmax(xs: number[], temperature = 100): number[] {
   return exps.map((e) => e / sum);
 }
 
-/** Every prompt the model scores against, in a fixed order. */
+/** Every prompt the models score against, in a fixed order. */
 function allPrompts(): string[] {
   return [
     ...LANDMARKS.map((l) => l.prompt),
@@ -111,14 +124,55 @@ function allPrompts(): string[] {
   ];
 }
 
+// CLIP's text/vision models expose `text_embeds` / `image_embeds`; SigLIP's
+// expose `pooler_output` for both modalities (the projection is built in).
+// `encodeTextBank` reads whichever key the model emitted, so a checkpoint that
+// names the output differently does not silently break scoring.
+
+/**
+ * Pre-encode a model's prompt bank once. Batched so a long bank does not blow
+ * the WASM heap in a single allocation. Returns a normalized row per prompt.
+ */
+async function encodeTextBank(
+  textModel: any,
+  tokenizer: any,
+  prompts: string[],
+  batchSize = 24
+): Promise<number[][]> {
+  const rows: number[][] = [];
+  for (let i = 0; i < prompts.length; i += batchSize) {
+    const slice = prompts.slice(i, i + batchSize);
+    const inputs = tokenizer(slice, { padding: true, truncation: true });
+    const out = await textModel(inputs);
+    const t = out?.text_embeds ?? out?.pooler_output;
+    if (!t) continue;
+    const [r, c] = t.dims as [number, number];
+    const data = t.data as Float32Array;
+    for (let k = 0; k < r; k++) {
+      rows.push(l2normalize(Array.from(data.slice(k * c, (k + 1) * c))));
+    }
+  }
+  return rows;
+}
+
 export async function loadVision(onProgress: (p: Progress) => void) {
   if (cached) return cached;
 
   const {
-    AutoProcessor, AutoTokenizer, CLIPTextModelWithProjection, CLIPVisionModelWithProjection,
+    AutoProcessor, AutoTokenizer,
+    CLIPTextModelWithProjection, CLIPVisionModelWithProjection,
+    SiglipTextModel, SiglipVisionModel,
   } = await loadLib();
 
-  const load = async (device: "webgpu" | "wasm", dtype: "fp16" | "q8") => {
+  const prompts = allPrompts();
+  const deviceOpts = () => {
+    const p = visionBackend();
+    return { device: p.device, dtype: p.dtype } as any;
+  };
+
+  // ── CLIP (the original pass). A failure here is fatal to the vision pass,
+  // so it is allowed to throw — the caller in page.tsx catches and reports it.
+  const loadClip = async (device: "webgpu" | "wasm", dtype: "fp16" | "q8") => {
     onProgress({
       stage: "vision",
       detail: `Loading the CLIP vision model on ${device.toUpperCase()} (first run downloads it once)`,
@@ -126,45 +180,57 @@ export async function loadVision(onProgress: (p: Progress) => void) {
     });
     const opts = { device, dtype } as any;
     return Promise.all([
-      AutoTokenizer.from_pretrained(MODEL_ID),
-      AutoProcessor.from_pretrained(MODEL_ID),
-      CLIPTextModelWithProjection.from_pretrained(MODEL_ID, opts),
-      CLIPVisionModelWithProjection.from_pretrained(MODEL_ID, opts),
+      AutoTokenizer.from_pretrained(CLIP_MODEL_ID),
+      AutoProcessor.from_pretrained(CLIP_MODEL_ID),
+      CLIPTextModelWithProjection.from_pretrained(CLIP_MODEL_ID, opts),
+      CLIPVisionModelWithProjection.from_pretrained(CLIP_MODEL_ID, opts),
     ]);
   };
 
+  let [tokenizer, processor, textModel, visionModel]: any[] = [];
   const preferred = visionBackend();
-  let tokenizer: any, processor: any, textModel: any, visionModel: any;
   try {
-    [tokenizer, processor, textModel, visionModel] = await load(preferred.device, preferred.dtype);
+    [tokenizer, processor, textModel, visionModel] = await loadClip(preferred.device, preferred.dtype);
     activeBackend = preferred.device;
   } catch (err) {
     if (preferred.device !== "webgpu") throw err;
-    // A browser can advertise navigator.gpu and still fail to get an adapter,
-    // so a working CPU fallback is not optional.
     onProgress({ stage: "vision", detail: "WebGPU was unavailable — falling back to WASM", pct: 0.5 });
-    [tokenizer, processor, textModel, visionModel] = await load("wasm", "q8");
+    [tokenizer, processor, textModel, visionModel] = await loadClip("wasm", "q8");
     activeBackend = "wasm";
   }
 
-  onProgress({ stage: "vision", detail: "Encoding the visual clue bank", pct: 0.56 });
+  onProgress({ stage: "vision", detail: "Encoding the CLIP visual clue bank", pct: 0.56 });
+  const clip: ModelCtx = {
+    tokenizer, processor, textModel, visionModel,
+    bank: { prompts, textEmbeddings: await encodeTextBank(textModel, tokenizer, prompts) },
+  };
 
-  const prompts = allPrompts();
-  const textEmbeddings: number[][] = [];
-  // Batched so a long bank does not blow the WASM heap in one allocation.
-  const BATCH = 24;
-  for (let i = 0; i < prompts.length; i += BATCH) {
-    const slice = prompts.slice(i, i + BATCH);
-    const inputs = tokenizer(slice, { padding: true, truncation: true });
-    const { text_embeds } = await textModel(inputs);
-    const [rows, cols] = text_embeds.dims as [number, number];
-    const data = text_embeds.data as Float32Array;
-    for (let r = 0; r < rows; r++) {
-      textEmbeddings.push(l2normalize(Array.from(data.slice(r * cols, (r + 1) * cols))));
-    }
+  // ── SigLIP (the second pass). This is genuinely optional: if the weights
+  // fail to download or the runtime rejects the dtype, the pass simply runs
+  // CLIP-only. The failure is swallowed here and surfaced through the mode
+  // the UI reads, so an investigator is told SigLIP is unavailable rather
+  // than losing the whole vision pass over it.
+  onProgress({ stage: "vision", detail: "Loading the SigLIP vision model", pct: 0.62 });
+  let siglip: ModelCtx | null = null;
+  try {
+    const opts = deviceOpts();
+    const [st, sp, stm, svm] = await Promise.all([
+      AutoTokenizer.from_pretrained(SIGLIP_MODEL_ID),
+      AutoProcessor.from_pretrained(SIGLIP_MODEL_ID),
+      SiglipTextModel.from_pretrained(SIGLIP_MODEL_ID, opts),
+      SiglipVisionModel.from_pretrained(SIGLIP_MODEL_ID, opts),
+    ]);
+    onProgress({ stage: "vision", detail: "Encoding the SigLIP visual clue bank", pct: 0.66 });
+    siglip = {
+      tokenizer: st, processor: sp, textModel: stm, visionModel: svm,
+      bank: { prompts, textEmbeddings: await encodeTextBank(stm, st, prompts) },
+    };
+  } catch (err) {
+    console.warn("SigLIP vision model could not be loaded; running CLIP-only:", err);
+    siglip = null;
   }
 
-  cached = { tokenizer, processor, textModel, visionModel, bank: { prompts, textEmbeddings } };
+  cached = { clip, siglip };
   return cached;
 }
 
@@ -172,11 +238,11 @@ export async function loadVision(onProgress: (p: Progress) => void) {
 async function scoreFrame(ctx: NonNullable<typeof cached>, blob: Blob, frameIndex: number): Promise<VisualClue[]> {
   const { RawImage } = await loadLib();
   const image = await RawImage.fromBlob(blob);
-  const inputs = await ctx.processor(image);
-  const { image_embeds } = await ctx.visionModel(inputs);
+  const inputs = await ctx.clip.processor(image);
+  const { image_embeds } = await ctx.clip.visionModel(inputs);
   const imageEmbedding = l2normalize(Array.from(image_embeds.data as Float32Array));
 
-  const sims = ctx.bank.textEmbeddings.map((t) => dot(imageEmbedding, t));
+  const sims = ctx.clip.bank.textEmbeddings.map((t) => dot(imageEmbedding, t));
   const probs = softmax(sims);
 
   const nLandmarks = LANDMARKS.length;
@@ -269,7 +335,7 @@ export async function analyseFrames(
     onProgress({
       stage: "vision",
       detail: `Looking at keyframe ${i + 1} of ${frames.length}`,
-      pct: 0.58 + (i / frames.length) * 0.2,
+      pct: 0.68 + (i / frames.length) * 0.12,
     });
     try {
       clues.push(...(await scoreFrame(ctx, frames[i].blob, frames[i].idx)));
