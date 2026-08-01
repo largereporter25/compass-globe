@@ -19,15 +19,34 @@ export type GlobePoint = {
 
 const ACCENT = "#FF5A1F";
 
+// NASA GIBS publishes daily true-color tiles per day on its EPSG:3857 REST
+// endpoint. The literal "default" time token 404s there, so a real ISO date
+// must be pinned. We take a UTC date a couple of days back — safely inside the
+// published window — once per page load, so the satellite view is live rather
+// than a frozen mosaic. A missing day simply yields empty tiles; it never
+// crashes the globe.
+const GIBS_DATE = (() => {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() - 2);
+  return d.toISOString().slice(0, 10);
+})();
+
+const gibsUrl = (layer: string) => (x: number, y: number, l: number) =>
+  `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/${layer}/default/${GIBS_DATE}/GoogleMapsCompatible_Level9/${l}/${y}/${x}.jpeg`;
+
 // Slippy-tile basemaps. Everything here is free to use with attribution and
-// needs no key, which keeps the project's "no paid providers" rule intact.
+// needs no key, which keeps the project's "no paid providers" rule intact. The
+// first three keys (satellite / street / terrain) are the original toggles and
+// keep their positions in the segmented control; the additional sources are
+// appended in the exact same button style. "satellite" is now live NASA GIBS
+// rather than the static Esri mosaic — Esri stays available as a labelled,
+// non-commercial-use legacy fallback entry.
 const BASEMAPS = {
   satellite: {
     label: "Satellite",
-    max: 19,
-    url: (x: number, y: number, l: number) =>
-      `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${l}/${y}/${x}`,
-    credit: "Imagery: Esri World Imagery (Maxar, Earthstar Geographics)",
+    max: 9,
+    url: gibsUrl("MODIS_Terra_CorrectedReflectance_TrueColor"),
+    credit: "Imagery © NASA GIBS (MODIS Terra, daily true-color)",
   },
   street: {
     label: "Street",
@@ -42,6 +61,20 @@ const BASEMAPS = {
     url: (x: number, y: number, l: number) =>
       `https://a.tile.opentopomap.org/${l}/${x}/${y}.png`,
     credit: "Terrain: OpenTopoMap (CC BY-SA), SRTM elevation",
+  },
+  viirs: {
+    label: "VIIRS",
+    max: 9,
+    url: gibsUrl("VIIRS_NOAA20_CorrectedReflectance_TrueColor"),
+    credit: "Imagery © NASA GIBS (NOAA-20 VIIRS, daily true-color)",
+  },
+  esri: {
+    label: "Esri",
+    max: 19,
+    url: (x: number, y: number, l: number) =>
+      `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${l}/${y}/${x}`,
+    credit:
+      "Imagery: Esri World Imagery (Maxar, Earthstar Geographics) — non-commercial use only per Esri terms",
   },
 } as const;
 
