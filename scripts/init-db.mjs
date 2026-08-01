@@ -19,7 +19,7 @@ const sql = neon(process.env.DATABASE_URL);
 const ddl = readFileSync(new URL("./schema.sql", import.meta.url), "utf8");
 
 for (const stmt of ddl.split(";").map((s) => s.trim()).filter(Boolean)) {
-  await sql.query(stmt);
+  await sql(stmt);
   console.log("ok:", stmt.split("\n")[0].slice(0, 70));
 }
 console.log("\nSchema ready.");
