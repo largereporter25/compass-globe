@@ -2,15 +2,45 @@ import type { Metadata } from "next";
 import { Analytics } from "@vercel/analytics/react";
 import "./globals.css";
 
+const siteUrl = "https://compass-globe.vercel.app";
+const socialDescription =
+  "Open-source geolocation triage for video evidence. Extract keyframes locally, turn visible clues into auditable leads, and plot candidate regions on a globe.";
+
 export const metadata: Metadata = {
-  title: "Compass Globe — open-source geolocation triage for video evidence",
-  description:
-    "Drop a video. Keyframes are extracted and read in your browser, on-screen text is turned into auditable location clues, and candidate regions are plotted on a globe with the reasoning attached. Open geodata only. No Google, no Bing, no paid vision APIs.",
+  metadataBase: new URL(siteUrl),
+  title: {
+    default: "Compass Globe — open-source geolocation triage for video evidence",
+    template: "%s | Compass Globe",
+  },
+  description: socialDescription,
+  alternates: {
+    canonical: "/",
+  },
   openGraph: {
     title: "Compass Globe",
-    description:
-      "Geolocation triage for video evidence. Local keyframe extraction and OCR, open geodata, and a reasoning trail you can audit.",
+    description: socialDescription,
     type: "website",
+    url: "/",
+    siteName: "Compass Globe",
+    images: [
+      {
+        url: "/og-image.png",
+        width: 1200,
+        height: 630,
+        alt: "Compass Globe — open-source geolocation triage for video evidence",
+      },
+    ],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "Compass Globe",
+    description: socialDescription,
+    images: [
+      {
+        url: "/og-image.png",
+        alt: "Compass Globe — open-source geolocation triage for video evidence",
+      },
+    ],
   },
 };
 
